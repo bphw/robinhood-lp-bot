@@ -8,6 +8,7 @@ mod telegram;
 use crate::config::AppConfig;
 use crate::models::PoolCandidate;
 use anyhow::Result;
+use ethers::middleware::Middleware;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use teloxide::prelude::*;
@@ -24,26 +25,47 @@ async fn main() -> Result<()> {
 
     let storage = Arc::new(Mutex::new(storage::Storage::load_or_default("state.json")?));
 
-    // Task 1: listen for Telegram button taps and execute LP adds.
-    let listener_cfg = cfg.clone();
-    let listener_client = client.clone();
-    let listener_bot = bot.clone();
+    // Task 1: listen for Telegram button taps ("Add LP now" / "Close
+    // position") and the /positions command.
+    let bot_cfg = cfg.clone();
+    let bot_client = client.clone();
+    let bot_storage = storage.clone();
+    let bot_for_listener = bot.clone();
     tokio::spawn(async move {
-        if let Err(e) = telegram::run_callback_listener(listener_bot, listener_cfg, listener_client).await {
-            log::error!("Telegram callback listener stopped: {e:?}");
+        if let Err(e) = telegram::run_bot(bot_for_listener, bot_cfg, bot_client, bot_storage).await {
+            log::error!("Telegram bot stopped: {e:?}");
         }
     });
 
-    log::info!(
-        "Starting screening loop (poll interval: {}s)",
-        cfg.screening.poll_interval_secs
-    );
-
-    loop {
-        if let Err(e) = run_scan_cycle(&cfg, client.clone(), &bot, chat_id, storage.clone()).await {
-            log::error!("Scan cycle failed: {e:?}");
+    // Task 2: pool discovery + screening loop (unchanged from before).
+    let scan_cfg = cfg.clone();
+    let scan_client = client.clone();
+    let scan_bot = bot.clone();
+    let scan_storage = storage.clone();
+    tokio::spawn(async move {
+        log::info!(
+            "Starting screening loop (poll interval: {}s)",
+            scan_cfg.screening.poll_interval_secs
+        );
+        loop {
+            if let Err(e) = run_scan_cycle(&scan_cfg, scan_client.clone(), &scan_bot, chat_id, scan_storage.clone()).await {
+                log::error!("Scan cycle failed: {e:?}");
+            }
+            tokio::time::sleep(Duration::from_secs(scan_cfg.screening.poll_interval_secs)).await;
         }
-        tokio::time::sleep(Duration::from_secs(cfg.screening.poll_interval_secs)).await;
+    });
+
+    // Task 3: position monitoring — PnL / take-profit / stop-loss / volume
+    // spikes, for pools where this bot holds an open LP position.
+    log::info!(
+        "Starting position monitoring loop (check interval: {}s)",
+        cfg.monitoring.position_check_interval_secs
+    );
+    loop {
+        if let Err(e) = run_monitoring_cycle(&cfg, client.clone(), &bot, chat_id, storage.clone()).await {
+            log::error!("Monitoring cycle failed: {e:?}");
+        }
+        tokio::time::sleep(Duration::from_secs(cfg.monitoring.position_check_interval_secs)).await;
     }
 }
 
@@ -109,6 +131,82 @@ async fn run_scan_cycle(
     {
         let mut s = storage.lock().await;
         s.set_last_scanned_block(latest_block)?;
+    }
+
+    Ok(())
+}
+
+/// For every open position: compute fresh PnL and alert (with a close
+/// button) if take-profit or stop-loss is hit; also check for a volume
+/// spike on that position's pool.
+async fn run_monitoring_cycle(
+    cfg: &Arc<AppConfig>,
+    client: Arc<chain::ChainClient>,
+    bot: &Bot,
+    chat_id: ChatId,
+    storage: Arc<Mutex<storage::Storage>>,
+) -> Result<()> {
+    let open_positions = { storage.lock().await.open_positions() };
+    if open_positions.is_empty() {
+        return Ok(());
+    }
+
+    let current_block = client.get_block_number().await?.as_u64();
+
+    for position in open_positions {
+        // --- PnL / take-profit / stop-loss ---
+        let already_tpsl_alerted = { storage.lock().await.already_tpsl_alerted(position.token_id) };
+        if !already_tpsl_alerted {
+            match chain::position::compute_pnl(client.clone(), cfg, &position).await {
+                Ok(pnl) => {
+                    let hit = if pnl.pnl_percent >= cfg.monitoring.take_profit_percent {
+                        Some("Take-profit")
+                    } else if pnl.pnl_percent <= -cfg.monitoring.stop_loss_percent {
+                        Some("Stop-loss")
+                    } else {
+                        None
+                    };
+                    if let Some(hit) = hit {
+                        if let Err(e) = telegram::send_tp_sl_alert(bot, chat_id, &position, pnl.pnl_percent, hit).await {
+                            log::error!("Failed to send TP/SL alert for position {}: {e:?}", position.token_id);
+                        } else {
+                            let mut s = storage.lock().await;
+                            s.mark_tpsl_alerted(position.token_id)?;
+                        }
+                    }
+                }
+                Err(e) => log::warn!("PnL check failed for position {}: {e:?}", position.token_id),
+            }
+        }
+
+        // --- Volume spike, scoped to this position's pool ---
+        let cooldown_blocks =
+            (cfg.monitoring.volume_spike_window_hours * cfg.monitoring.approx_blocks_per_hour as f64) as u64;
+        let on_cooldown = {
+            storage.lock().await.spike_alert_on_cooldown(position.pool_address, current_block, cooldown_blocks)
+        };
+        if !on_cooldown {
+            let pool_info = models::PoolInfo {
+                address: position.pool_address,
+                token0: position.token0,
+                token1: position.token1,
+                fee: position.fee,
+                created_block: position.pool_created_block,
+                created_timestamp: 0,
+            };
+            match chain::spike::check_volume_spike(client.clone(), cfg, &pool_info, current_block).await {
+                Ok(Some(spike)) => {
+                    if let Err(e) = telegram::send_spike_alert(bot, chat_id, &position, &spike).await {
+                        log::error!("Failed to send spike alert for position {}: {e:?}", position.token_id);
+                    } else {
+                        let mut s = storage.lock().await;
+                        s.mark_spike_alerted(position.pool_address, current_block)?;
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => log::warn!("Volume spike check failed for pool {:?}: {e:?}", position.pool_address),
+            }
+        }
     }
 
     Ok(())

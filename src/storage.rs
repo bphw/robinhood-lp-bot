@@ -1,13 +1,20 @@
+use crate::models::Position;
 use anyhow::Result;
 use ethers::types::Address;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct StateFile {
     last_scanned_block: u64,
     alerted_pools: HashSet<Address>,
+    #[serde(default)]
+    positions: HashMap<u64, Position>,
+    #[serde(default)]
+    tpsl_alerted: HashSet<u64>,
+    #[serde(default)]
+    last_spike_alert_block: HashMap<Address, u64>,
 }
 
 pub struct Storage {
@@ -42,6 +49,55 @@ impl Storage {
 
     pub fn mark_alerted(&mut self, pool: Address) -> Result<()> {
         self.state.alerted_pools.insert(pool);
+        self.persist()
+    }
+
+    pub fn add_position(&mut self, position: Position) -> Result<()> {
+        self.state.positions.insert(position.token_id, position);
+        self.persist()
+    }
+
+    pub fn open_positions(&self) -> Vec<Position> {
+        self.state
+            .positions
+            .values()
+            .filter(|p| !p.closed)
+            .cloned()
+            .collect()
+    }
+
+    #[allow(dead_code)]
+    pub fn get_position(&self, token_id: u64) -> Option<Position> {
+        self.state.positions.get(&token_id).cloned()
+    }
+
+    pub fn mark_position_closed(&mut self, token_id: u64) -> Result<()> {
+        if let Some(p) = self.state.positions.get_mut(&token_id) {
+            p.closed = true;
+        }
+        self.persist()
+    }
+
+    pub fn already_tpsl_alerted(&self, token_id: u64) -> bool {
+        self.state.tpsl_alerted.contains(&token_id)
+    }
+
+    pub fn mark_tpsl_alerted(&mut self, token_id: u64) -> Result<()> {
+        self.state.tpsl_alerted.insert(token_id);
+        self.persist()
+    }
+
+    /// Returns true if we're still within the cooldown window since the last
+    /// spike alert for this pool (i.e. we should NOT alert again yet).
+    pub fn spike_alert_on_cooldown(&self, pool: Address, current_block: u64, cooldown_blocks: u64) -> bool {
+        match self.state.last_spike_alert_block.get(&pool) {
+            Some(&last) => current_block.saturating_sub(last) < cooldown_blocks,
+            None => false,
+        }
+    }
+
+    pub fn mark_spike_alerted(&mut self, pool: Address, current_block: u64) -> Result<()> {
+        self.state.last_spike_alert_block.insert(pool, current_block);
         self.persist()
     }
 

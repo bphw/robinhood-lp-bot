@@ -73,6 +73,25 @@ poll_interval_secs = 120
 # shorter (less accurate) volume window.
 lookback_blocks_for_volume = 864000
 
+[monitoring]
+# Close (with a Telegram confirmation button) once a position's PnL hits
+# either of these.
+take_profit_percent = 25.0
+stop_loss_percent = 15.0
+
+# How often to re-check open positions for PnL / TP-SL / volume spikes.
+position_check_interval_secs = 60
+
+# Alert if recent-window volume is at least this many times the previous
+# window's volume for a pool you're currently providing liquidity to.
+volume_spike_multiplier = 3.0
+volume_spike_window_hours = 1.0
+
+# Used to convert volume_spike_window_hours into a block range. Check
+# https://robinhoodchain.blockscout.com for the current average block time
+# and adjust if it drifts noticeably from ~0.1s blocks (~36,000/hour).
+approx_blocks_per_hour = 36000
+
 [telegram]
 # TODO: create a bot via @BotFather on Telegram and paste its token here.
 bot_token = "TODO_REPLACE_ME"

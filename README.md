@@ -23,9 +23,42 @@ button to add liquidity to any pool that passes.
 5. When you tap it, the bot builds and sends the actual `mint()` transaction
    to Uniswap's `NonfungiblePositionManager`, sized at your configured USD
    amount, centered on the pool's current price with your configured range
-   and slippage.
+   and slippage. The resulting position (NFT `tokenId`) is tracked in
+   `state.json` going forward.
+6. For every position it's tracking, a separate loop (its own configurable
+   interval) re-checks:
+   - **PnL** — current value of the underlying liquidity plus any
+     uncollected fees, minus what you originally put in.
+   - **Take-profit / stop-loss** — if PnL crosses either threshold, you get
+     a Telegram alert with a **"🔴 Close position"** button. Tapping it
+     removes all liquidity and collects both principal and fees back to
+     your wallet.
+   - **Volume spikes** — if recent-window volume on that position's pool
+     jumps well above the window before it, you get an alert (with the same
+     close button, since a spike can be a reason to exit either direction).
+7. **`/positions`** (or `/pnl`) — message the bot this anytime for a live
+   PnL snapshot of every open position, on demand.
 
-## ⚠️ Important limitations — read before using with real funds
+## What it does NOT do (yet)
+
+- **No fully-automatic closing.** Every close, whether triggered by
+  take-profit, stop-loss, or a volume spike, requires you to tap the
+  Telegram button. Nothing sells on your behalf without a tap.
+- **No slippage protection on close.** `close_position` currently sends
+  `decreaseLiquidity` with `amount0Min`/`amount1Min` set to zero — it
+  doesn't compute expected amounts first and apply your slippage tolerance
+  the way `add_liquidity` does. In practice this means a close could execute
+  at a worse price than expected if the pool moves (or gets sandwiched)
+  between the alert and your tap. See the `TODO` in `src/chain/lp.rs`
+  `close_position` — wiring `chain::position::compute_pnl`'s underlying
+  amounts through with `wallet.slippage_bps` applied would close this gap.
+- **Entry cost basis is approximate.** A new position's `entry_cost_usd` is
+  recorded as `wallet.default_lp_usd_amount` (what you asked to add), not
+  the exact USD value actually deposited on-chain — these can differ
+  slightly due to price impact/slippage at mint time. Good enough for
+  PnL-based alerting; not exact accounting.
+
+## Known limitations (from the original build — still apply)
 
 - **Uniswap v2, v3, v4, and UniswapX are all live on Robinhood Chain.** This
   bot only understands **v3-style pools** (a factory that deploys individual
@@ -105,19 +138,22 @@ button to add liquidity to any pool that passes.
 ```
 src/
   config.rs          Loads and validates config.toml
-  models.rs           Shared data types (PoolInfo, PoolMetrics, ScreenResult)
+  models.rs           Shared data types (PoolInfo, PoolMetrics, Position, PositionPnl, ScreenResult, VolumeSpike)
   screener.rs         Applies your thresholds, explains why a pool passed/failed
-  storage.rs          Tracks last-scanned block + already-alerted pools
+  storage.rs          Tracks last-scanned block, alerted pools, open positions, TP/SL + spike alert dedup
   chain/
     abi.rs            Uniswap V3 + ERC20 + NonfungiblePositionManager bindings
     mod.rs            RPC provider / wallet signer setup
     pools.rs           Discovers pools via PoolCreated events
-    metrics.rs         Computes TVL, volume, APR, age
+    pricing.rs          Shared WETH/USDG pricing helpers (used by metrics, position, spike)
+    metrics.rs          Computes TVL, volume, APR, age for newly discovered pools
+    position.rs         Uniswap V3 liquidity math + PnL computation for open positions
+    spike.rs            Volume-spike detection (recent window vs. previous window)
     safety.rs          Contract-verification check via Blockscout API
-    lp.rs               Builds and sends the add-liquidity transaction
+    lp.rs               Builds/sends the add-liquidity and close-position transactions
   telegram/
-    mod.rs             Sends alerts, handles the "Add LP now" button tap
-  main.rs              Polling loop wiring it all together
+    mod.rs             Alerts, the "Add LP now" / "Close position" buttons, and the /positions command
+  main.rs              Wires up three loops: pool discovery, Telegram dispatcher, position monitoring
 ```
 
 ## Extending this
@@ -133,3 +169,12 @@ src/
   approximates a 50/50 split using the pool's own price ratio; wiring in the
   same WETH/USDG pricing helper used in `metrics.rs` would make the USD
   amount exact rather than approximate.
+- **Slippage-protected close**: `close_position` sends `amount0Min`/
+  `amount1Min` as zero. Computing expected amounts (via
+  `chain::position::compute_pnl`'s liquidity math) and applying
+  `wallet.slippage_bps` would close this gap — see the `TODO` in
+  `src/chain/lp.rs`.
+- **Fully-automatic closing**: if you'd rather skip the confirmation tap for
+  take-profit/stop-loss, `run_monitoring_cycle` in `main.rs` is the place to
+  call `chain::lp::close_position` directly instead of going through
+  `telegram::send_tp_sl_alert`.

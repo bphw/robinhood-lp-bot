@@ -56,10 +56,31 @@ pub struct TelegramConfig {
 }
 
 #[derive(Debug, Deserialize, Clone)]
+pub struct MonitoringConfig {
+    /// Close (with confirmation) once a position's PnL reaches +this percent.
+    pub take_profit_percent: f64,
+    /// Close (with confirmation) once a position's PnL reaches -this percent.
+    pub stop_loss_percent: f64,
+    /// How often to re-check open positions for PnL / TP-SL / volume spikes.
+    pub position_check_interval_secs: u64,
+    /// Alert when recent-window volume is at least this many times the
+    /// previous window's volume (e.g. 3.0 = a 3x jump).
+    pub volume_spike_multiplier: f64,
+    /// Size of each comparison window, in hours (recent vs. the window
+    /// immediately before it).
+    pub volume_spike_window_hours: f64,
+    /// Robinhood Chain runs sub-second blocks; used to convert
+    /// volume_spike_window_hours into a block range. Check the explorer for
+    /// the current average and adjust if it drifts.
+    pub approx_blocks_per_hour: u64,
+}
+
+#[derive(Debug, Deserialize, Clone)]
 pub struct AppConfig {
     pub chain: ChainConfig,
     pub wallet: WalletConfig,
     pub screening: ScreeningConfig,
+    pub monitoring: MonitoringConfig,
     pub telegram: TelegramConfig,
 }
 

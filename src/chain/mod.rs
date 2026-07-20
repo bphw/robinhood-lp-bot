@@ -2,7 +2,10 @@ pub mod abi;
 pub mod lp;
 pub mod metrics;
 pub mod pools;
+pub mod position;
+pub mod pricing;
 pub mod safety;
+pub mod spike;
 
 use crate::config::AppConfig;
 use anyhow::{Context, Result};

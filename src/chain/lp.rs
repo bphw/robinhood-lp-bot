@@ -1,7 +1,12 @@
-use super::abi::{Erc20, MintParams, NonfungiblePositionManager, UniswapV3Pool};
+use super::abi::{
+    CollectParams, DecreaseLiquidityParams, Erc20, IncreaseLiquidityFilter, MintParams,
+    NonfungiblePositionManager, UniswapV3Pool,
+};
 use super::ChainClient;
 use crate::config::AppConfig;
 use anyhow::{Context, Result};
+use ethers::abi::RawLog;
+use ethers::contract::EthLogDecode;
 use ethers::types::{Address, U256};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -9,7 +14,17 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 pub struct LpResult {
     pub tx_hash: String,
-    pub token_id: Option<U256>,
+    pub explorer_tx_url: String,
+    pub token_id: Option<u64>,
+    pub token0: Address,
+    pub token1: Address,
+    pub fee: u32,
+    pub tick_lower: i32,
+    pub tick_upper: i32,
+}
+
+pub struct CloseResult {
+    pub tx_hash: String,
     pub explorer_tx_url: String,
 }
 
@@ -29,6 +44,10 @@ fn fee_to_tick_spacing(fee: u32) -> i32 {
 fn nearest_usable_tick(tick: i32, spacing: i32) -> i32 {
     let rounded = (tick as f64 / spacing as f64).round() as i32;
     rounded * spacing
+}
+
+fn deadline_in(secs: u64) -> U256 {
+    U256::from(SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() + secs)
 }
 
 /// Adds liquidity to `pool_address` sized at `usd_amount` (split ~50/50 by
@@ -60,14 +79,14 @@ pub async fn add_liquidity(
     let price_1_per_0 = raw_price_1_per_0 * 10f64.powi(dec0 as i32 - dec1 as i32);
 
     // Split the USD amount 50/50 by value. We don't know USD prices here in
-    // absolute terms (that lives in metrics.rs) — instead we size relative to
+    // absolute terms (that lives in pricing.rs) — instead we size relative to
     // the pool's own price ratio so the two amounts are balanced for the
     // current tick, then scale by usd_amount as a rough total-value proxy.
     // NOTE: this assumes `usd_amount` is denominated such that "half in each
     // token, in the pool's price ratio" is a reasonable approximation; for
-    // precise USD sizing, wire in the same pricing helper used in metrics.rs.
+    // precise USD sizing, wire in chain::pricing::price_pool_tokens here too.
     let half = usd_amount / 2.0;
-    let amount0_desired_human = half; // treat token0 leg as `half` units of token0's own numeraire
+    let amount0_desired_human = half;
     let amount1_desired_human = half * price_1_per_0;
 
     let amount0_desired = U256::from((amount0_desired_human * 10f64.powi(dec0 as i32)) as u128);
@@ -84,13 +103,7 @@ pub async fn add_liquidity(
     let amount1_min = U256::from(((amount1_desired.as_u128() as f64) * (1.0 - slippage)) as u128);
 
     let recipient = client.address();
-    let deadline = U256::from(
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
-            + 600,
-    );
+    let deadline = deadline_in(600);
 
     // Approvals — required before the position manager can pull tokens in.
     approve_if_needed(&erc0, cfg, amount0_desired).await?;
@@ -118,20 +131,85 @@ pub async fn add_liquidity(
     let tx_hash = format!("{:#x}", pending.tx_hash());
     let receipt = pending.await.context("waiting for mint tx receipt")?;
 
-    let token_id = receipt.and_then(|_r| None); // decoding the tokenId from logs is a further step; tx hash is enough to confirm on explorer.
+    // Pull the tokenId out of the IncreaseLiquidity event emitted during
+    // mint, rather than trusting log ordering/indices.
+    let token_id = receipt.as_ref().and_then(|r| {
+        r.logs.iter().find_map(|log| {
+            if log.address != pm_address {
+                return None;
+            }
+            let raw = RawLog { topics: log.topics.clone(), data: log.data.to_vec() };
+            IncreaseLiquidityFilter::decode_log(&raw).ok().map(|ev| ev.token_id.as_u64())
+        })
+    });
 
     Ok(LpResult {
         explorer_tx_url: format!("{}/tx/{}", cfg.chain.explorer_base_url.trim_end_matches('/'), tx_hash),
         tx_hash,
         token_id,
+        token0,
+        token1,
+        fee,
+        tick_lower,
+        tick_upper,
     })
 }
 
-async fn approve_if_needed(
-    erc20: &Erc20<ChainClient>,
-    cfg: &AppConfig,
-    amount: U256,
-) -> Result<()> {
+/// Fully closes an open position: removes all liquidity and collects both
+/// principal and any uncollected fees back to the wallet, then attempts to
+/// burn the now-empty NFT (best-effort; failure to burn doesn't fail the
+/// close — the funds are already out).
+pub async fn close_position(client: Arc<ChainClient>, cfg: &AppConfig, token_id: u64) -> Result<CloseResult> {
+    let pm_address = Address::from_str(&cfg.chain.position_manager)?;
+    let pm = NonfungiblePositionManager::new(pm_address, client.clone());
+
+    let info = pm.positions(U256::from(token_id)).call().await.context("fetching position before close")?;
+    let liquidity = info.7; // (nonce, operator, token0, token1, fee, tickLower, tickUpper, liquidity, ...)
+
+    #[allow(unused_assignments)]
+    let mut last_tx_hash = String::new();
+
+    if liquidity > 0 {
+        let slippage = cfg.wallet.slippage_bps as f64 / 10_000.0;
+        // TODO: this doesn't actually apply `slippage` yet — amount0Min/
+        // amount1Min below are hardcoded to zero. Compute expected amounts
+        // (e.g. via chain::position::compute_pnl's underlying math) and
+        // apply the slippage tolerance here for real execution protection.
+        let _ = slippage;
+        let decrease_params = DecreaseLiquidityParams {
+            token_id: U256::from(token_id),
+            liquidity,
+            amount_0_min: U256::zero(),
+            amount_1_min: U256::zero(),
+            deadline: deadline_in(600),
+        };
+        let call = pm.decrease_liquidity(decrease_params);
+        let pending = call.send().await.context("sending decreaseLiquidity tx")?;
+        last_tx_hash = format!("{:#x}", pending.tx_hash());
+        pending.await.context("waiting for decreaseLiquidity receipt")?;
+    }
+
+    let collect_params = CollectParams {
+        token_id: U256::from(token_id),
+        recipient: client.address(),
+        amount_0_max: u128::MAX,
+        amount_1_max: u128::MAX,
+    };
+    let call = pm.collect(collect_params);
+    let pending = call.send().await.context("sending collect tx")?;
+    last_tx_hash = format!("{:#x}", pending.tx_hash());
+    pending.await.context("waiting for collect receipt")?;
+
+    // Best-effort cleanup; a failed burn doesn't matter, the funds are safe.
+    let _ = pm.burn(U256::from(token_id)).send().await;
+
+    Ok(CloseResult {
+        explorer_tx_url: format!("{}/tx/{}", cfg.chain.explorer_base_url.trim_end_matches('/'), last_tx_hash),
+        tx_hash: last_tx_hash,
+    })
+}
+
+async fn approve_if_needed(erc20: &Erc20<ChainClient>, cfg: &AppConfig, amount: U256) -> Result<()> {
     let spender = Address::from_str(&cfg.chain.position_manager)?;
     let owner = erc20.client().address();
     let current = erc20.allowance(owner, spender).call().await.unwrap_or_default();
