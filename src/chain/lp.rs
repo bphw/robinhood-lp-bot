@@ -2,6 +2,7 @@ use super::abi::{
     CollectParams, DecreaseLiquidityParams, Erc20, IncreaseLiquidityFilter, MintParams,
     NonfungiblePositionManager, UniswapV3Pool,
 };
+use super::position::{amounts_for_liquidity, tick_to_sqrt_price};
 use super::ChainClient;
 use crate::config::AppConfig;
 use anyhow::{Context, Result};
@@ -159,28 +160,50 @@ pub async fn add_liquidity(
 /// principal and any uncollected fees back to the wallet, then attempts to
 /// burn the now-empty NFT (best-effort; failure to burn doesn't fail the
 /// close — the funds are already out).
-pub async fn close_position(client: Arc<ChainClient>, cfg: &AppConfig, token_id: u64) -> Result<CloseResult> {
+///
+/// `pool_address` is needed to read the current price so we can compute an
+/// expected payout and apply `wallet.slippage_bps` as a floor — without
+/// this, a zero-minimum close is an open invitation for a sandwich attack
+/// (see the module-level note in the README).
+pub async fn close_position(
+    client: Arc<ChainClient>,
+    cfg: &AppConfig,
+    token_id: u64,
+    pool_address: Address,
+) -> Result<CloseResult> {
     let pm_address = Address::from_str(&cfg.chain.position_manager)?;
     let pm = NonfungiblePositionManager::new(pm_address, client.clone());
 
     let info = pm.positions(U256::from(token_id)).call().await.context("fetching position before close")?;
-    let liquidity = info.7; // (nonce, operator, token0, token1, fee, tickLower, tickUpper, liquidity, ...)
+    let (tick_lower, tick_upper, liquidity) = (info.5, info.6, info.7);
+    // (nonce, operator, token0, token1, fee, tickLower, tickUpper, liquidity, ...)
 
     #[allow(unused_assignments)]
     let mut last_tx_hash = String::new();
 
     if liquidity > 0 {
+        // Compute the expected payout right now, at the current on-chain
+        // price, then require the actual execution to be within
+        // `slippage_bps` of it. If the price has moved (or someone tries to
+        // sandwich this transaction) beyond that tolerance by the time it
+        // lands, decreaseLiquidity reverts instead of paying out at a worse
+        // price.
+        let pool = UniswapV3Pool::new(pool_address, client.clone());
+        let slot0 = pool.slot_0().call().await.context("fetching pool slot0 for close")?;
+        let sqrt_p = slot0.0.as_u128() as f64 / 2f64.powi(96);
+        let sqrt_pa = tick_to_sqrt_price(tick_lower);
+        let sqrt_pb = tick_to_sqrt_price(tick_upper);
+        let (expected0_raw, expected1_raw) = amounts_for_liquidity(liquidity, sqrt_p, sqrt_pa, sqrt_pb);
+
         let slippage = cfg.wallet.slippage_bps as f64 / 10_000.0;
-        // TODO: this doesn't actually apply `slippage` yet — amount0Min/
-        // amount1Min below are hardcoded to zero. Compute expected amounts
-        // (e.g. via chain::position::compute_pnl's underlying math) and
-        // apply the slippage tolerance here for real execution protection.
-        let _ = slippage;
+        let amount0_min = U256::from((expected0_raw * (1.0 - slippage)).max(0.0) as u128);
+        let amount1_min = U256::from((expected1_raw * (1.0 - slippage)).max(0.0) as u128);
+
         let decrease_params = DecreaseLiquidityParams {
             token_id: U256::from(token_id),
             liquidity,
-            amount_0_min: U256::zero(),
-            amount_1_min: U256::zero(),
+            amount_0_min: amount0_min,
+            amount_1_min: amount1_min,
             deadline: deadline_in(600),
         };
         let call = pm.decrease_liquidity(decrease_params);

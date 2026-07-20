@@ -298,7 +298,20 @@ async fn handle_close_tap(
         }
     };
 
-    let result = close_position(client.clone(), &cfg, token_id).await;
+    let position = { storage.lock().await.get_position(token_id) };
+    let pool_address = match position {
+        Some(p) => p.pool_address,
+        None => {
+            if let Some(chat_id) = chat_id {
+                let _ = bot
+                    .send_message(chat_id, format!("Don't have position `#{token_id}` on record — can't determine its pool to close it safely."))
+                    .await;
+            }
+            return;
+        }
+    };
+
+    let result = close_position(client.clone(), &cfg, token_id, pool_address).await;
     let text = match &result {
         Ok(r) => {
             let mut s = storage.lock().await;

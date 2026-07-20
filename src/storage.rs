@@ -66,7 +66,6 @@ impl Storage {
             .collect()
     }
 
-    #[allow(dead_code)]
     pub fn get_position(&self, token_id: u64) -> Option<Position> {
         self.state.positions.get(&token_id).cloned()
     }

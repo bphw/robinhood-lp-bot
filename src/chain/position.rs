@@ -11,7 +11,7 @@ use std::sync::Arc;
 /// sqrt(1.0001^tick) — the raw (non-decimal-adjusted) sqrt price at a given
 /// tick, in the same units as sqrtPriceX96/2^96. This is the standard
 /// Uniswap V3 tick-to-price relationship.
-fn tick_to_sqrt_price(tick: i32) -> f64 {
+pub fn tick_to_sqrt_price(tick: i32) -> f64 {
     1.0001f64.powf(tick as f64 / 2.0)
 }
 
@@ -19,8 +19,10 @@ fn tick_to_sqrt_price(tick: i32) -> f64 {
 /// non-decimal-adjusted units), returns (amount0_raw, amount1_raw) — the
 /// token amounts represented by that liquidity, in each token's smallest
 /// unit (e.g. wei). This is the standard Uniswap V3 formula used to convert
-/// an NFT position's `liquidity` into actual token amounts.
-fn amounts_for_liquidity(liquidity: u128, sqrt_p: f64, sqrt_pa: f64, sqrt_pb: f64) -> (f64, f64) {
+/// an NFT position's `liquidity` into actual token amounts, and is reused
+/// both for PnL display and for computing slippage-protected minimums when
+/// closing a position (see `chain::lp::close_position`).
+pub fn amounts_for_liquidity(liquidity: u128, sqrt_p: f64, sqrt_pa: f64, sqrt_pb: f64) -> (f64, f64) {
     let l = liquidity as f64;
     let (sqrt_pa, sqrt_pb) = if sqrt_pa <= sqrt_pb { (sqrt_pa, sqrt_pb) } else { (sqrt_pb, sqrt_pa) };
 

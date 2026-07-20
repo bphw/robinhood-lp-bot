@@ -44,14 +44,13 @@ button to add liquidity to any pool that passes.
 - **No fully-automatic closing.** Every close, whether triggered by
   take-profit, stop-loss, or a volume spike, requires you to tap the
   Telegram button. Nothing sells on your behalf without a tap.
-- **No slippage protection on close.** `close_position` currently sends
-  `decreaseLiquidity` with `amount0Min`/`amount1Min` set to zero — it
-  doesn't compute expected amounts first and apply your slippage tolerance
-  the way `add_liquidity` does. In practice this means a close could execute
-  at a worse price than expected if the pool moves (or gets sandwiched)
-  between the alert and your tap. See the `TODO` in `src/chain/lp.rs`
-  `close_position` — wiring `chain::position::compute_pnl`'s underlying
-  amounts through with `wallet.slippage_bps` applied would close this gap.
+- **Slippage protection on close is now in place.** `close_position`
+  computes the expected token amounts for the position's liquidity at the
+  current on-chain price (same liquidity math used for PnL), applies
+  `wallet.slippage_bps` to get `amount0Min`/`amount1Min`, and sends those to
+  `decreaseLiquidity`. If the price has moved beyond your tolerance by the
+  time the transaction lands — including from a sandwich attempt — it
+  reverts instead of paying out at a worse price.
 - **Entry cost basis is approximate.** A new position's `entry_cost_usd` is
   recorded as `wallet.default_lp_usd_amount` (what you asked to add), not
   the exact USD value actually deposited on-chain — these can differ
@@ -169,11 +168,6 @@ src/
   approximates a 50/50 split using the pool's own price ratio; wiring in the
   same WETH/USDG pricing helper used in `metrics.rs` would make the USD
   amount exact rather than approximate.
-- **Slippage-protected close**: `close_position` sends `amount0Min`/
-  `amount1Min` as zero. Computing expected amounts (via
-  `chain::position::compute_pnl`'s liquidity math) and applying
-  `wallet.slippage_bps` would close this gap — see the `TODO` in
-  `src/chain/lp.rs`.
 - **Fully-automatic closing**: if you'd rather skip the confirmation tap for
   take-profit/stop-loss, `run_monitoring_cycle` in `main.rs` is the place to
   call `chain::lp::close_position` directly instead of going through
