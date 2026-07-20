@@ -1,0 +1,52 @@
+[package]
+name = "robinhood_lp_bot"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "robinhood_lp_bot"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+ethers = { version = "2", default-features = false, features = ["abigen"] }
+teloxide = { version = "0.12", features = ["macros"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.5"
+anyhow = "1"
+thiserror = "1"
+log = "0.4"
+env_logger = "0.11"
+reqwest = { version = "0.11", features = ["json", "native-tls"], default-features = false }
+chrono = "0.4"
+# Pinned because newer patch releases require Rust edition2024, which this
+# toolchain (rustc 1.75) doesn't support yet. Safe to remove/relax once you
+# build with a newer Rust (1.85+).
+base64ct = "=1.6.0"
+toml_edit = "=0.22.27"
+toml_datetime = "=0.6.11"
+proc-macro-crate = "=3.3.0"
+idna_adapter = "=1.2.0"
+zeroize = "=1.8.2"
+time = "=0.3.41"
+home = "=0.5.9"
+hashbrown = "=0.15.5"
+indexmap = "=2.11.4"
+uuid = "=1.20.0"
+rand = "=0.8.5"
+getrandom = "=0.2.15"
+jobserver = "=0.1.32"
+digest = "=0.10.7"
+crypto-common = "=0.1.6"
+sha3 = "=0.10.8"
+tempfile = "=3.24.0"
+litemap = "=0.7.4"
+native-tls = "=0.2.13"
+erasable = "=1.2.1"
+cargo-platform = "=0.1.8"
+openssl-sys = "=0.9.114"
+parity-scale-codec-derive = "=3.6.12"
+rc-box = "=1.2.0"
+parity-scale-codec = "=3.6.12"
+openssl = "=0.10.78"

@@ -1,0 +1,80 @@
+# Copy this file to config.toml and fill in the blanks marked TODO.
+# config.toml is read from the working directory when you run the bot.
+
+[chain]
+rpc_url = "https://rpc.mainnet.chain.robinhood.com"
+chain_id = 4663
+
+# --- Uniswap V3 on Robinhood Chain (confirmed from developers.uniswap.org,
+# "Robinhood Chain Deployments", as of July 2026). Uniswap v2, v3, v4, and
+# UniswapX are ALL live on Robinhood Chain — this bot only screens v3-style
+# pools (factory + individual pool contracts + NFT positions). It will NOT
+# see v2 pools or v4 singleton-pool liquidity. If most new pools end up
+# launching on v4 instead, this bot needs a v4 PoolManager-based rewrite
+# (different architecture: no per-pair contracts, no PoolCreated events on a
+# factory — everything lives in one singleton PoolManager with "hooks").
+# Re-check developers.uniswap.org/docs/protocols/v3/deployments/v3-robinhood-chain-deployments
+# before relying on this for real money, in case addresses ever change.
+uniswap_v3_factory = "0x1f7d7550b1b028f7571e69a784071f0205fd2efa"
+position_manager = "0x73991a25c818bf1f1128deaab1492d45638de0d3"
+
+# Reference assets used to price pools in USD terms (see README "How pricing
+# works"). Robinhood Chain's stablecoin is USDG, not USDC — the field is
+# just named usdc_address for readability, point it at USDG.
+weth_address = "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73"
+usdc_address = "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168"  # USDG, 6 decimals
+
+# TODO: Set this to the UniswapV3Factory's contract-creation block so the bot
+# doesn't scan from genesis. Find it by opening the factory address on
+# https://robinhoodchain.blockscout.com/address/0x1f7d7550b1b028f7571e69a784071f0205fd2efa
+# and reading the "at txn" block of its creation transaction.
+# Robinhood Chain runs ~0.1s block times, so genesis-to-now is tens of
+# millions of blocks — getting this right matters a lot for how long the
+# first scan takes.
+factory_deployment_block = 1
+
+blockscout_api_base = "https://robinhoodchain.blockscout.com/api/v2"
+explorer_base_url = "https://robinhoodchain.blockscout.com"
+
+[wallet]
+# TODO: a DEDICATED hot wallet private key, funded with ONLY what you're
+# willing to risk in one-tap automated transactions. Never your main wallet.
+private_key = "0xTODO_REPLACE_ME"
+
+# Total USD-equivalent size (split ~50/50 across both tokens) added each time
+# you tap "Add LP now" in Telegram.
+default_lp_usd_amount = 100.0
+
+# Max acceptable slippage between quoted and executed amounts, in basis
+# points. 100 = 1%.
+slippage_bps = 100
+
+# Concentrated-liquidity price range, as +/- this percent around the pool's
+# current price, e.g. 10.0 = a position active from -10% to +10% of the
+# current price.
+tick_range_percent = 10.0
+
+[screening]
+min_tvl_usd = 20000.0
+min_volume_24h_usd = 5000.0
+min_apr_percent = 15.0
+# Treat implausibly high estimated APR as a red flag (thin/manipulated
+# liquidity), not a bonus, rather than screening it in.
+max_apr_percent = 5000.0
+min_pool_age_hours = 6.0
+require_verified_tokens = true
+
+# How often to run a screening pass.
+poll_interval_secs = 120
+
+# How many blocks back to sum Swap events for the 24h volume estimate.
+# Robinhood Chain runs ~0.1s blocks, so 24h ≈ 864,000 blocks — adjust this
+# down if that makes each scan too slow/rate-limited, at the cost of a
+# shorter (less accurate) volume window.
+lookback_blocks_for_volume = 864000
+
+[telegram]
+# TODO: create a bot via @BotFather on Telegram and paste its token here.
+bot_token = "TODO_REPLACE_ME"
+# TODO: your personal chat ID (message @userinfobot on Telegram to get it).
+chat_id = 0
