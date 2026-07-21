@@ -8,32 +8,47 @@ use std::sync::Arc;
 
 const STABLE_DECIMALS_FALLBACK: u8 = 6;
 
-pub async fn eth_price_usd(client: Arc<ChainClient>, cfg: &AppConfig) -> Result<f64> {
+/// Common Uniswap V3 fee tiers, checked in this order when looking for
+/// whichever pool actually exists between two tokens.
+const COMMON_FEE_TIERS: [u32; 4] = [500, 3000, 10000, 100];
+
+/// Finds the fee tier of the first existing pool between `token_a` and
+/// `token_b`, checking common fee tiers in order. Returns None if no pool
+/// exists between them at any of the checked tiers.
+pub async fn find_pool_fee(client: Arc<ChainClient>, cfg: &AppConfig, token_a: Address, token_b: Address) -> Result<Option<u32>> {
     let factory_addr = Address::from_str(&cfg.chain.uniswap_v3_factory)?;
-    let factory = UniswapV3Factory::new(factory_addr, client.clone());
+    let factory = UniswapV3Factory::new(factory_addr, client);
+    for fee in COMMON_FEE_TIERS {
+        let pool_addr = factory.get_pool(token_a, token_b, fee).call().await.unwrap_or_default();
+        if pool_addr != Address::zero() {
+            return Ok(Some(fee));
+        }
+    }
+    Ok(None)
+}
+
+pub async fn eth_price_usd(client: Arc<ChainClient>, cfg: &AppConfig) -> Result<f64> {
     let weth = Address::from_str(&cfg.chain.weth_address)?;
     let usdc = Address::from_str(&cfg.chain.usdc_address)?;
 
-    // Try the common fee tiers in order until one has a deployed pool.
-    for fee in [500u32, 3000, 10000, 100] {
-        let pool_addr = factory.get_pool(weth, usdc, fee).call().await.unwrap_or_default();
-        if pool_addr == Address::zero() {
-            continue;
-        }
-        let pool = UniswapV3Pool::new(pool_addr, client.clone());
-        let (t0, _t1) = (pool.token_0().call().await?, pool.token_1().call().await?);
-        let slot0 = pool.slot_0().call().await?;
-        let sqrt_price_x96 = slot0.0;
+    let Some(fee) = find_pool_fee(client.clone(), cfg, weth, usdc).await? else {
+        anyhow::bail!("could not find a WETH/USDC pool to price ETH from");
+    };
 
-        let (weth_decimals, usdc_decimals) = (18u8, STABLE_DECIMALS_FALLBACK);
-        let price_1_per_0 = sqrt_price_x96_to_price(sqrt_price_x96, weth_decimals, usdc_decimals, t0 == weth);
+    let factory_addr = Address::from_str(&cfg.chain.uniswap_v3_factory)?;
+    let factory = UniswapV3Factory::new(factory_addr, client.clone());
+    let pool_addr = factory.get_pool(weth, usdc, fee).call().await?;
+    let pool = UniswapV3Pool::new(pool_addr, client.clone());
+    let (t0, _t1) = (pool.token_0().call().await?, pool.token_1().call().await?);
+    let slot0 = pool.slot_0().call().await?;
+    let sqrt_price_x96 = slot0.0;
 
-        // price_1_per_0 here is defined as "USD per WETH" once we account for
-        // which token is which — see sqrt_price_x96_to_price for the convention.
-        return Ok(price_1_per_0);
-    }
+    let (weth_decimals, usdc_decimals) = (18u8, STABLE_DECIMALS_FALLBACK);
+    let price_1_per_0 = sqrt_price_x96_to_price(sqrt_price_x96, weth_decimals, usdc_decimals, t0 == weth);
 
-    anyhow::bail!("could not find a WETH/USDC pool to price ETH from")
+    // price_1_per_0 here is defined as "USD per WETH" once we account for
+    // which token is which — see sqrt_price_x96_to_price for the convention.
+    Ok(price_1_per_0)
 }
 
 /// Converts a Uniswap V3 slot0 sqrtPriceX96 into a human-readable price of

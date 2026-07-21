@@ -41,6 +41,21 @@ abigen!(
 );
 
 abigen!(
+    SwapRouter02,
+    r#"[
+        struct ExactInputSingleParams { address tokenIn; address tokenOut; uint24 fee; address recipient; uint256 amountIn; uint256 amountOutMinimum; uint160 sqrtPriceLimitX96; }
+        function exactInputSingle(ExactInputSingleParams params) external payable returns (uint256 amountOut)
+    ]"#
+);
+
+abigen!(
+    QuoterV2,
+    r#"[
+        struct QuoteExactInputSingleParams { address tokenIn; address tokenOut; uint256 amountIn; uint24 fee; uint160 sqrtPriceLimitX96; }
+        function quoteExactInputSingle(QuoteExactInputSingleParams params) external returns (uint256 amountOut, uint160 sqrtPriceX96After, uint32 initializedTicksCrossed, uint256 gasEstimate)
+    ]"#
+);
+abigen!(
     NonfungiblePositionManager,
     r#"[
         struct MintParams { address token0; address token1; uint24 fee; int24 tickLower; int24 tickUpper; uint256 amount0Desired; uint256 amount1Desired; uint256 amount0Min; uint256 amount1Min; address recipient; uint256 deadline; }
@@ -53,5 +68,6 @@ abigen!(
         function burn(uint256 tokenId) external payable
         event IncreaseLiquidity(uint256 indexed tokenId, uint128 liquidity, uint256 amount0, uint256 amount1)
         event DecreaseLiquidity(uint256 indexed tokenId, uint128 liquidity, uint256 amount0, uint256 amount1)
+        event Collect(uint256 indexed tokenId, address recipient, uint256 amount0, uint256 amount1)
     ]"#
 );

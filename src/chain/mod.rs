@@ -1,4 +1,5 @@
 pub mod abi;
+pub mod autoswap;
 pub mod lp;
 pub mod metrics;
 pub mod pools;

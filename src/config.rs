@@ -24,6 +24,13 @@ pub struct ChainConfig {
     /// Human-facing explorer base URL, used to build tx links in Telegram
     /// messages, e.g. "https://robinhoodchain.blockscout.com"
     pub explorer_base_url: String,
+    /// Uniswap SwapRouter02 — used to auto-swap closed-position proceeds
+    /// into a single stable asset (USDG).
+    pub swap_router: String,
+    /// Uniswap QuoterV2 — used to get an accurate expected-output quote
+    /// before each auto-swap, so a real slippage minimum can be applied
+    /// (rather than swapping with no floor at all).
+    pub quoter_v2: String,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -111,6 +118,8 @@ impl AppConfig {
         Address::from_str(&self.chain.position_manager).context("invalid position_manager address")?;
         Address::from_str(&self.chain.weth_address).context("invalid weth_address")?;
         Address::from_str(&self.chain.usdc_address).context("invalid usdc_address")?;
+        Address::from_str(&self.chain.swap_router).context("invalid swap_router address")?;
+        Address::from_str(&self.chain.quoter_v2).context("invalid quoter_v2 address")?;
 
         if self.wallet.private_key.trim().is_empty() {
             anyhow::bail!("wallet.private_key is not set");

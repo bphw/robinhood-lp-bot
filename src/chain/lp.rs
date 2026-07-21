@@ -1,7 +1,8 @@
 use super::abi::{
-    CollectParams, DecreaseLiquidityParams, Erc20, IncreaseLiquidityFilter, MintParams,
+    CollectFilter, CollectParams, DecreaseLiquidityParams, Erc20, IncreaseLiquidityFilter, MintParams,
     NonfungiblePositionManager, UniswapV3Pool,
 };
+use super::autoswap::{swap_proceeds_to_usdg, SwapResult};
 use super::position::{amounts_for_liquidity, tick_to_sqrt_price};
 use super::ChainClient;
 use crate::config::AppConfig;
@@ -27,6 +28,10 @@ pub struct LpResult {
 pub struct CloseResult {
     pub tx_hash: String,
     pub explorer_tx_url: String,
+    /// Swaps performed to route proceeds into USDG, if any (empty if the
+    /// position was already 100% USDG on both legs, or one leg had zero
+    /// balance to begin with).
+    pub swaps: Vec<SwapResult>,
 }
 
 fn fee_to_tick_spacing(fee: u32) -> i32 {
@@ -165,6 +170,7 @@ pub async fn add_liquidity(
 /// expected payout and apply `wallet.slippage_bps` as a floor — without
 /// this, a zero-minimum close is an open invitation for a sandwich attack
 /// (see the module-level note in the README).
+#[allow(unused_assignments)]
 pub async fn close_position(
     client: Arc<ChainClient>,
     cfg: &AppConfig,
@@ -175,10 +181,9 @@ pub async fn close_position(
     let pm = NonfungiblePositionManager::new(pm_address, client.clone());
 
     let info = pm.positions(U256::from(token_id)).call().await.context("fetching position before close")?;
-    let (tick_lower, tick_upper, liquidity) = (info.5, info.6, info.7);
+    let (token0, token1, position_fee, tick_lower, tick_upper, liquidity) = (info.2, info.3, info.4, info.5, info.6, info.7);
     // (nonce, operator, token0, token1, fee, tickLower, tickUpper, liquidity, ...)
 
-    #[allow(unused_assignments)]
     let mut last_tx_hash = String::new();
 
     if liquidity > 0 {
@@ -221,7 +226,31 @@ pub async fn close_position(
     let call = pm.collect(collect_params);
     let pending = call.send().await.context("sending collect tx")?;
     last_tx_hash = format!("{:#x}", pending.tx_hash());
-    pending.await.context("waiting for collect receipt")?;
+    let collect_receipt = pending.await.context("waiting for collect receipt")?;
+
+    // Decode the actual amounts transferred out (principal + fees combined)
+    // from the Collect event, rather than trusting our own pre-computed
+    // estimate — this is what really landed in the wallet.
+    let (collected0, collected1) = collect_receipt
+        .as_ref()
+        .and_then(|r| {
+            r.logs.iter().find_map(|log| {
+                if log.address != pm_address {
+                    return None;
+                }
+                let raw = RawLog { topics: log.topics.clone(), data: log.data.to_vec() };
+                CollectFilter::decode_log(&raw).ok().map(|ev| (ev.amount_0, ev.amount_1))
+            })
+        })
+        .unwrap_or((U256::zero(), U256::zero()));
+
+    let swaps = if collected0.is_zero() && collected1.is_zero() {
+        Vec::new()
+    } else {
+        swap_proceeds_to_usdg(client.clone(), cfg, token0, collected0, token1, collected1, position_fee)
+            .await
+            .context("auto-swapping proceeds to USDG")?
+    };
 
     // Best-effort cleanup; a failed burn doesn't matter, the funds are safe.
     let _ = pm.burn(U256::from(token_id)).send().await;
@@ -229,6 +258,7 @@ pub async fn close_position(
     Ok(CloseResult {
         explorer_tx_url: format!("{}/tx/{}", cfg.chain.explorer_base_url.trim_end_matches('/'), last_tx_hash),
         tx_hash: last_tx_hash,
+        swaps,
     })
 }
 

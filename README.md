@@ -31,19 +31,53 @@ button to add liquidity to any pool that passes.
      uncollected fees, minus what you originally put in.
    - **Take-profit / stop-loss** — if PnL crosses either threshold, you get
      a Telegram alert with a **"🔴 Close position"** button. Tapping it
-     removes all liquidity and collects both principal and fees back to
-     your wallet.
+     removes all liquidity, collects both principal and fees, and
+     **automatically swaps both tokens into USDG** before confirming — see
+     "Auto-swap on close" below.
    - **Volume spikes** — if recent-window volume on that position's pool
      jumps well above the window before it, you get an alert (with the same
      close button, since a spike can be a reason to exit either direction).
 7. **`/positions`** (or `/pnl`) — message the bot this anytime for a live
    PnL snapshot of every open position, on demand.
 
+## Auto-swap on close
+
+Every close routes both legs of the position into USDG automatically —
+that's what you land with in your wallet, not a mix of whatever two tokens
+the pool happened to be. No extra confirmation tap; it's part of the same
+close action. Routing logic (in `chain/autoswap.rs`):
+
+- A leg that's already USDG: left alone.
+- A leg that's WETH: swapped directly, WETH → USDG.
+- Any other token: it was paired with WETH or USDG in the pool you just
+  exited (screening guarantees this), so it either swaps directly to USDG
+  at that same fee tier, or two-hops through WETH if that's what it was
+  paired with.
+
+Each swap gets a **QuoterV2 quote first**, then applies `wallet.slippage_bps`
+as a real minimum — same slippage-protection principle as the
+`decreaseLiquidity` fix, applied here too.
+
+**If the auto-swap step fails after liquidity is already removed**, your
+funds are not stuck or lost — they're sitting in your wallet as the
+original two tokens (collect already succeeded). The bot tells you this in
+the failure message; check `/positions` (it'll show as closed) and the
+explorer, then swap manually if needed.
+
+**Edge case not handled**: if a pool's two tokens are neither WETH nor USDG
+on either side, there's no route to auto-swap through, and the close fails
+with an explicit error (rather than silently leaving mismatched tokens).
+This shouldn't come up in practice — screening already excludes pools like
+that, since they're unpriceable in the first place.
+
 ## What it does NOT do (yet)
 
-- **No fully-automatic closing.** Every close, whether triggered by
-  take-profit, stop-loss, or a volume spike, requires you to tap the
-  Telegram button. Nothing sells on your behalf without a tap.
+- **The close itself still isn't fully automatic.** Every close, whether
+  triggered by take-profit, stop-loss, or a volume spike, still requires you
+  to tap the "Close position" button — nothing sells on your behalf without
+  a tap. What *is* automatic is what happens after you tap: liquidity
+  removal, fee collection, and the swap into USDG all happen in one go, no
+  second confirmation needed for the swap step.
 - **Slippage protection on close is now in place.** `close_position`
   computes the expected token amounts for the position's liquidity at the
   current on-chain price (same liquidity math used for PnL), applies

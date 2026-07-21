@@ -36,6 +36,12 @@ factory_deployment_block = 1
 blockscout_api_base = "https://robinhoodchain.blockscout.com/api/v2"
 explorer_base_url = "https://robinhoodchain.blockscout.com"
 
+# Used to auto-swap closed-position proceeds into USDG. Confirmed from
+# developers.uniswap.org's Robinhood Chain deployments page, same source as
+# the addresses above — re-verify there if anything seems off.
+swap_router = "0xcaf681a66d020601342297493863e78c959e5cb2"
+quoter_v2 = "0x33e885ed0ec9bf04ecfb19341582aadcb4c8a9e7"
+
 [wallet]
 # TODO: a DEDICATED hot wallet private key, funded with ONLY what you're
 # willing to risk in one-tap automated transactions. Never your main wallet.

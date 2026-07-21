@@ -318,12 +318,25 @@ async fn handle_close_tap(
             if let Err(e) = s.mark_position_closed(token_id) {
                 log::error!("Failed to mark position {token_id} closed: {e:?}");
             }
-            format!(
+            let mut msg = format!(
                 "✅ Position `#{token_id}` closed.\n[View on explorer]({})",
                 r.explorer_tx_url
-            )
+            );
+            if r.swaps.is_empty() {
+                msg.push_str("\nProceeds were already USDG — no swap needed.");
+            } else {
+                msg.push_str(&format!("\n🔄 Auto-swapped proceeds to USDG ({} swap(s)):", r.swaps.len()));
+                for swap in &r.swaps {
+                    msg.push_str(&format!("\n  `{:#x}` → ~{} out", swap.token_in, swap.amount_out));
+                }
+            }
+            msg
         }
-        Err(e) => format!("❌ Failed to close position `#{token_id}`:\n`{e}`"),
+        Err(e) => format!(
+            "❌ Failed to close position `#{token_id}`:\n`{e}`\n\nNote: if liquidity was already removed but the \
+             auto-swap step failed, funds are still safely in your wallet as the original two tokens — check \
+             /positions and the explorer before retrying."
+        ),
     };
 
     if let Some(chat_id) = chat_id {
