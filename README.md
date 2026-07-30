@@ -91,6 +91,34 @@ that, since they're unpriceable in the first place.
   slightly due to price impact/slippage at mint time. Good enough for
   PnL-based alerting; not exact accounting.
 
+## Security model
+
+**Every incoming Telegram message and button tap is checked against
+`telegram.chat_id` before anything runs.** This bot holds a real private key
+and executes real transactions, so this check is the entire security
+boundary between "only I can trigger trades" and "anyone who finds my bot's
+username can." Concretely (in `telegram/mod.rs`):
+
+- Any message from a different chat is logged (`Ignoring message from
+  unauthorized chat ...`) and dropped — no command runs.
+- Any button tap from a different chat is logged and dropped the same way —
+  `add_liquidity` and `close_position` are unreachable from anywhere else.
+
+**What this does NOT protect against:**
+- If your `telegram.bot_token` leaks, an attacker still can't act (wrong
+  chat ID gets rejected) — but they could spam your bot or see it exists.
+  Regenerate the token via @BotFather if you suspect it leaked.
+- If your `wallet.private_key` leaks, this check is irrelevant — whoever has
+  the key can transact directly on-chain, bypassing Telegram entirely. The
+  chat-ID check protects the *bot's* interface, not the wallet itself. This
+  is exactly why the wallet should be a dedicated hot wallet with limited
+  funds, not your main one.
+- This bot doesn't run a lock file to prevent two copies of itself running
+  at once against the same Telegram bot token and wallet — doing so would
+  cause both a Telegram polling conflict (`409`) and, more importantly,
+  transaction nonce collisions if both tried to trade simultaneously. Don't
+  run more than one instance against the same config.
+
 ## Known limitations (from the original build — still apply)
 
 - **Uniswap v2, v3, v4, and UniswapX are all live on Robinhood Chain.** This
@@ -152,7 +180,10 @@ that, since they're unpriceable in the first place.
      [@BotFather](https://t.me/BotFather) on Telegram, `/newbot`, and copy the
      token it gives you.
    - `telegram.chat_id` — message [@userinfobot](https://t.me/userinfobot) on
-     Telegram to get your numeric chat ID.
+     Telegram to get your numeric chat ID. **This is a security boundary, not
+     just an address** — the bot only acts on messages/button-taps from this
+     exact chat; everything else is logged and silently ignored (see
+     "Security model" below).
    - Adjust the `[screening]` thresholds to taste.
 
 4. **Build and run:**

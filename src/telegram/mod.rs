@@ -147,6 +147,15 @@ pub async fn handle_positions_command(
     Ok(())
 }
 
+/// The single security boundary for this bot: only the chat configured as
+/// `telegram.chat_id` may trigger anything. Everyone else's messages and
+/// button taps are logged and silently dropped — this bot holds a real
+/// signing key, so an unauthenticated sender must never be able to reach
+/// `add_liquidity` or `close_position`.
+fn is_owner(cfg: &AppConfig, chat_id: i64) -> bool {
+    chat_id == cfg.telegram.chat_id
+}
+
 /// Runs the Telegram dispatcher: listens for the "Add LP now" / "Close
 /// position" button taps and the `/positions` command.
 pub async fn run_bot(
@@ -163,6 +172,15 @@ pub async fn run_bot(
         let client = client_cb.clone();
         let storage = storage_cb.clone();
         async move {
+            let sender_chat_id = q.message.as_ref().map(|m| m.chat.id.0).unwrap_or(q.from.id.0 as i64);
+            if !is_owner(&cfg, sender_chat_id) {
+                log::warn!(
+                    "Ignoring callback query from unauthorized chat {sender_chat_id} (from user {}) — configured owner is {}",
+                    q.from.id, cfg.telegram.chat_id
+                );
+                return respond(());
+            }
+
             if let Some(data) = q.data.clone() {
                 if let Some(pool_hex) = data.strip_prefix("addlp:") {
                     handle_add_lp_tap(&bot, &q, cfg, client, storage, pool_hex).await;
@@ -182,6 +200,14 @@ pub async fn run_bot(
         let client = client_msg.clone();
         let storage = storage_msg.clone();
         async move {
+            if !is_owner(&cfg, msg.chat.id.0) {
+                log::warn!(
+                    "Ignoring message from unauthorized chat {} — configured owner is {}",
+                    msg.chat.id, cfg.telegram.chat_id
+                );
+                return respond(());
+            }
+
             if let Some(text) = msg.text() {
                 if text.trim().starts_with("/positions") || text.trim().starts_with("/pnl") {
                     if let Err(e) = handle_positions_command(&bot, msg.chat.id, &cfg, client, storage).await {
