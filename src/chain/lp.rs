@@ -2,7 +2,7 @@ use super::abi::{
     CollectFilter, CollectParams, DecreaseLiquidityParams, Erc20, IncreaseLiquidityFilter, MintParams,
     NonfungiblePositionManager, UniswapV3Pool,
 };
-use super::autoswap::{swap_proceeds_to_usdg, SwapResult};
+use super::autoswap::{swap_proceeds_to_usdg, AutoSwapOutcome, FailedLeg, SwapResult};
 use super::position::{amounts_for_liquidity, tick_to_sqrt_price};
 use super::ChainClient;
 use crate::config::AppConfig;
@@ -32,6 +32,11 @@ pub struct CloseResult {
     /// position was already 100% USDG on both legs, or one leg had zero
     /// balance to begin with).
     pub swaps: Vec<SwapResult>,
+    /// Legs that couldn't be swapped to USDG (e.g. a token that turned into
+    /// a honeypot after being screened) — left in the wallet as whatever
+    /// token they ended up as. The close itself still succeeds; this is
+    /// reported so you know to check on it.
+    pub failed_legs: Vec<FailedLeg>,
 }
 
 fn fee_to_tick_spacing(fee: u32) -> i32 {
@@ -244,9 +249,15 @@ pub async fn close_position(
         })
         .unwrap_or((U256::zero(), U256::zero()));
 
-    let swaps = if collected0.is_zero() && collected1.is_zero() {
-        Vec::new()
+    let outcome: AutoSwapOutcome = if collected0.is_zero() && collected1.is_zero() {
+        AutoSwapOutcome { swaps: Vec::new(), failed_legs: Vec::new() }
     } else {
+        // Note: swap_proceeds_to_usdg already isolates per-leg failures
+        // internally (see its doc comment) — it only returns Err for
+        // something structural like a bad config address, not for an
+        // individual honeypot leg. So this ? is intentional: a genuine
+        // error here means something is actually wrong, not just "one leg
+        // was a honeypot."
         swap_proceeds_to_usdg(client.clone(), cfg, token0, collected0, token1, collected1, position_fee)
             .await
             .context("auto-swapping proceeds to USDG")?
@@ -258,7 +269,8 @@ pub async fn close_position(
     Ok(CloseResult {
         explorer_tx_url: format!("{}/tx/{}", cfg.chain.explorer_base_url.trim_end_matches('/'), last_tx_hash),
         tx_hash: last_tx_hash,
-        swaps,
+        swaps: outcome.swaps,
+        failed_legs: outcome.failed_legs,
     })
 }
 

@@ -32,6 +32,9 @@ fn format_alert(result: &ScreenResult) -> String {
     if let Some(apr) = m.apr_percent {
         lines.push(format!("*Est. fee APR:* {:.1}%", apr));
     }
+    if let (Some(true), Some(loss)) = (m.honeypot_sellable, m.honeypot_round_trip_loss_percent) {
+        lines.push(format!("*Honeypot check:* passed (simulated round-trip loss {:.1}%)", loss));
+    }
     lines.push(format!("*Age:* {:.1}h", m.age_hours));
     lines.push(String::new());
     lines.push("*Why it passed:*".to_string());
@@ -355,6 +358,16 @@ async fn handle_close_tap(
                 for swap in &r.swaps {
                     msg.push_str(&format!("\n  `{:#x}` → ~{} out", swap.token_in, swap.amount_out));
                 }
+            }
+            if !r.failed_legs.is_empty() {
+                msg.push_str("\n\n⚠️ *Some proceeds couldn't be auto-swapped* (likely the token turned into a honeypot after screening — force-closed rather than blocking the whole close):");
+                for leg in &r.failed_legs {
+                    msg.push_str(&format!(
+                        "\n  `{:#x}` — {} left in wallet as-is\n    reason: {}",
+                        leg.stuck_token, leg.stuck_amount, leg.reason
+                    ));
+                }
+                msg.push_str("\nCheck /positions and your wallet balance — you may want to try swapping this manually or just hold it.");
             }
             msg
         }

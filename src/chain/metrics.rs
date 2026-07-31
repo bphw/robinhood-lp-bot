@@ -42,33 +42,36 @@ pub async fn compute_metrics(
     )
     .await;
 
-    let (tvl_usd, volume_24h_usd, apr_percent) = if let Some((p0, p1)) = prices {
-        let erc0 = Erc20::new(pool.token0, client.clone());
-        let erc1 = Erc20::new(pool.token1, client.clone());
-        let bal0 = erc0.balance_of(pool.address).call().await.unwrap_or_default();
-        let bal1 = erc1.balance_of(pool.address).call().await.unwrap_or_default();
+    let (tvl_usd, volume_24h_usd, apr_percent, honeypot_sellable, honeypot_round_trip_loss_percent) =
+        if let Some((p0, p1)) = prices {
+            let erc0 = Erc20::new(pool.token0, client.clone());
+            let erc1 = Erc20::new(pool.token1, client.clone());
+            let bal0 = erc0.balance_of(pool.address).call().await.unwrap_or_default();
+            let bal1 = erc1.balance_of(pool.address).call().await.unwrap_or_default();
 
-        let bal0_h = bal0.as_u128() as f64 / 10f64.powi(dec0 as i32);
-        let bal1_h = bal1.as_u128() as f64 / 10f64.powi(dec1 as i32);
-        let tvl = bal0_h * p0 + bal1_h * p1;
+            let bal0_h = bal0.as_u128() as f64 / 10f64.powi(dec0 as i32);
+            let bal1_h = bal1.as_u128() as f64 / 10f64.powi(dec1 as i32);
+            let tvl = bal0_h * p0 + bal1_h * p1;
 
-        let lookback = cfg.screening.lookback_blocks_for_volume;
-        let from_block = current_block.saturating_sub(lookback).max(pool.created_block);
-        let volume = estimate_volume_usd(client.clone(), pool.address, from_block, current_block, dec0, dec1, p0, p1)
-            .await
-            .unwrap_or(0.0);
+            let lookback = cfg.screening.lookback_blocks_for_volume;
+            let from_block = current_block.saturating_sub(lookback).max(pool.created_block);
+            let volume = estimate_volume_usd(client.clone(), pool.address, from_block, current_block, dec0, dec1, p0, p1)
+                .await
+                .unwrap_or(0.0);
 
-        let fee_fraction = pool.fee as f64 / 1_000_000.0;
-        let apr = if tvl > 0.0 {
-            (volume * fee_fraction / tvl) * 365.0 * 100.0
+            let fee_fraction = pool.fee as f64 / 1_000_000.0;
+            let apr = if tvl > 0.0 {
+                (volume * fee_fraction / tvl) * 365.0 * 100.0
+            } else {
+                0.0
+            };
+
+            let (sellable, loss_pct) = run_honeypot_check(client.clone(), cfg, pool, dec0, dec1, p0, p1).await;
+
+            (Some(tvl), Some(volume), Some(apr), sellable, loss_pct)
         } else {
-            0.0
+            (None, None, None, None, None)
         };
-
-        (Some(tvl), Some(volume), Some(apr))
-    } else {
-        (None, None, None)
-    };
 
     Ok(PoolMetrics {
         token0_symbol: sym0,
@@ -79,7 +82,54 @@ pub async fn compute_metrics(
         age_hours,
         token0_verified,
         token1_verified,
+        honeypot_sellable,
+        honeypot_round_trip_loss_percent,
     })
+}
+
+/// Figures out which side of the pool is the non-reference token (WETH and
+/// USDG are presumed safe to sell), sizes a small test amount using the
+/// already-known price, and runs the buy-then-sell simulation on it. Returns
+/// (None, None) if both sides are reference assets — nothing to test.
+async fn run_honeypot_check(
+    client: Arc<ChainClient>,
+    cfg: &AppConfig,
+    pool: &PoolInfo,
+    dec0: u8,
+    dec1: u8,
+    p0: f64,
+    p1: f64,
+) -> (Option<bool>, Option<f64>) {
+    use ethers::types::{Address, U256};
+    use std::str::FromStr;
+
+    let Ok(weth) = Address::from_str(&cfg.chain.weth_address) else { return (None, None) };
+    let Ok(usdg) = Address::from_str(&cfg.chain.usdc_address) else { return (None, None) };
+
+    let (test_token, reference, ref_price, ref_decimals) = if pool.token0 != weth && pool.token0 != usdg {
+        (pool.token0, pool.token1, p1, dec1)
+    } else if pool.token1 != weth && pool.token1 != usdg {
+        (pool.token1, pool.token0, p0, dec0)
+    } else {
+        return (None, None); // both sides are reference assets, nothing to test
+    };
+
+    if ref_price <= 0.0 {
+        return (None, None);
+    }
+    let test_amount_human = cfg.screening.honeypot_test_amount_usd / ref_price;
+    let test_amount_raw = U256::from((test_amount_human * 10f64.powi(ref_decimals as i32)) as u128);
+    if test_amount_raw.is_zero() {
+        return (None, None);
+    }
+
+    match super::honeypot::check_honeypot(client, cfg, test_token, reference, pool.fee, test_amount_raw).await {
+        Ok(check) => (Some(check.sellable), check.round_trip_loss_percent),
+        Err(e) => {
+            log::warn!("Honeypot check failed for pool {:?}: {e:?}", pool.address);
+            (None, None)
+        }
+    }
 }
 
 /// Sums swap volume in USD over an arbitrary block range `[from_block,

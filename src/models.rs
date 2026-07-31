@@ -24,6 +24,11 @@ pub struct PoolMetrics {
     pub age_hours: f64,
     pub token0_verified: Option<bool>,
     pub token1_verified: Option<bool>,
+    /// Honeypot round-trip simulation result for the non-reference token in
+    /// the pair (None if the pool is unpriceable, same condition as
+    /// tvl_usd/volume_24h_usd/apr_percent being None).
+    pub honeypot_sellable: Option<bool>,
+    pub honeypot_round_trip_loss_percent: Option<f64>,
 }
 
 #[derive(Debug, Clone)]

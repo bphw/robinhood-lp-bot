@@ -77,6 +77,36 @@ pub fn screen(candidate: PoolCandidate, cfg: &ScreeningConfig) -> ScreenResult {
         }
     }
 
+    match m.honeypot_sellable {
+        Some(true) => match m.honeypot_round_trip_loss_percent {
+            Some(loss) if loss <= cfg.max_honeypot_loss_percent => {
+                reasons.push(format!(
+                    "Honeypot check passed: simulated buy-then-sell round trip lost {:.1}% (<= {:.1}% max)",
+                    loss, cfg.max_honeypot_loss_percent
+                ));
+            }
+            Some(loss) => {
+                passed = false;
+                reasons.push(format!(
+                    "Simulated round-trip loss {:.1}% exceeds max {:.1}% — likely a hidden sell tax",
+                    loss, cfg.max_honeypot_loss_percent
+                ));
+            }
+            None => {
+                passed = false;
+                reasons.push("Honeypot check returned sellable but no loss figure — treating as inconclusive".to_string());
+            }
+        },
+        Some(false) => {
+            passed = false;
+            reasons.push("Honeypot check FAILED: simulated sell reverted — token likely can't be sold".to_string());
+        }
+        None => {
+            passed = false;
+            reasons.push("Honeypot check inconclusive (pool unpriceable or quoter call failed)".to_string());
+        }
+    }
+
     ScreenResult {
         candidate,
         passed,

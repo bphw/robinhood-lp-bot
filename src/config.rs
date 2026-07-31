@@ -52,6 +52,16 @@ pub struct ScreeningConfig {
     pub max_apr_percent: f64,
     pub min_pool_age_hours: f64,
     pub require_verified_tokens: bool,
+    /// Reject a pool if the simulated sell reverts, or if a simulated
+    /// buy-then-sell round trip loses more than this percent — see
+    /// `chain::honeypot`. This is a real check but not a full guarantee
+    /// (see the module doc comment there for why).
+    pub max_honeypot_loss_percent: f64,
+    /// Size (in USD-equivalent of the reference asset) of the simulated
+    /// buy used for the honeypot round-trip test. Small enough not to
+    /// matter, large enough that quantized/minimum-trade-size tokens still
+    /// produce a meaningful quote.
+    pub honeypot_test_amount_usd: f64,
     pub poll_interval_secs: u64,
     pub lookback_blocks_for_volume: u64,
 }

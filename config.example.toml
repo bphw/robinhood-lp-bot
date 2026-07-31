@@ -70,6 +70,15 @@ max_apr_percent = 5000.0
 min_pool_age_hours = 6.0
 require_verified_tokens = true
 
+# Honeypot check: simulates a small buy-then-sell round trip (via Uniswap's
+# Quoter) on the non-reference side of the pool. Rejects the pool outright if
+# the simulated sell reverts, or if the round trip loses more than this
+# percent (a normal pool loses a few percent to fees/slippage; a hidden sell
+# tax loses much more). See src/chain/honeypot.rs for what this does and
+# doesn't catch — it's a real check, not a full guarantee.
+max_honeypot_loss_percent = 15.0
+honeypot_test_amount_usd = 20.0
+
 # How often to run a screening pass.
 poll_interval_secs = 120
 

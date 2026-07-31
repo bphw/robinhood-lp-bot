@@ -17,6 +17,9 @@ button to add liquidity to any pool that passes.
    - **Estimated fee APR** (`volume × fee tier ÷ TVL`, annualized)
    - **Pool age**
    - **Contract verification status** of both tokens (via Blockscout's API)
+   - **Honeypot check** — simulates a small buy-then-sell round trip via
+     Uniswap's Quoter; rejects the pool if the simulated sell reverts or
+     loses more than `max_honeypot_loss_percent` to a hidden tax
 3. Screens each pool against the thresholds in `config.toml`.
 4. If it passes, sends you a Telegram message with an inline **"✅ Add LP
    now"** button.
@@ -58,17 +61,23 @@ Each swap gets a **QuoterV2 quote first**, then applies `wallet.slippage_bps`
 as a real minimum — same slippage-protection principle as the
 `decreaseLiquidity` fix, applied here too.
 
-**If the auto-swap step fails after liquidity is already removed**, your
-funds are not stuck or lost — they're sitting in your wallet as the
-original two tokens (collect already succeeded). The bot tells you this in
-the failure message; check `/positions` (it'll show as closed) and the
-explorer, then swap manually if needed.
+**Force-close: a failing leg doesn't block the rest.** If one side can't be
+swapped — most likely because the token turned into a honeypot after it was
+screened — that leg's failure is isolated (in `chain/autoswap.rs`) rather
+than erroring out the whole close. The other leg (usually where most of the
+real value is, since it's WETH/USDG) still gets swapped and confirmed
+normally. The Telegram close message tells you explicitly which leg got
+stuck, in what token, and why, so you can decide whether to hold it or try
+swapping it manually later. Nothing is silently lost — collect() has
+already moved everything into your wallet before any swap is attempted; a
+failed swap just means that leg stays as its original token instead of
+becoming USDG.
 
-**Edge case not handled**: if a pool's two tokens are neither WETH nor USDG
-on either side, there's no route to auto-swap through, and the close fails
-with an explicit error (rather than silently leaving mismatched tokens).
-This shouldn't come up in practice — screening already excludes pools like
-that, since they're unpriceable in the first place.
+**Edge case still not auto-routed**: if a pool's two tokens are neither WETH
+nor USDG on either side, there's no route to auto-swap through — that leg
+gets reported as a failed/stuck leg the same way a honeypot would. This
+shouldn't come up in practice, since screening already excludes pools like
+that (they're unpriceable in the first place).
 
 ## What it does NOT do (yet)
 
@@ -135,13 +144,23 @@ username can." Concretely (in `telegram/mod.rs`):
   "unpriceable"), even if it's a fine pool. This is a deliberate choice —
   guessing a price without a reference asset would be worse than not
   scoring it at all.
-- **Token verification ≠ a safety guarantee.** `require_verified_tokens`
-  checks whether the token's source is verified on Blockscout. It does not
-  detect honeypots, hidden transfer taxes, mint backdoors, or blacklist
-  functions. There's no tx-simulation/honeypot-checking step wired in —
-  review any pool manually before sizing up past your default LP amount.
-  See the comment in `src/chain/safety.rs` for what a fuller check would
-  need.
+- **Token verification and the honeypot check are real signals, not a full
+  guarantee.** `require_verified_tokens` only confirms the source is
+  verified on Blockscout — it says nothing about what that source *does*.
+  The honeypot check (`chain/honeypot.rs`) simulates a buy-then-sell round
+  trip via Uniswap's Quoter and catches the common case (a sell that
+  reverts, or a large hidden tax) — but it exercises the *simulated* call
+  path, not a real transaction from your actual wallet. A sufficiently
+  adversarial token could in principle behave differently for a real
+  transaction than for a simulated one (e.g. gating on `tx.origin`, or on
+  transaction history). A fully rigorous check would need state-override
+  `eth_call` simulation against your specific wallet address, which isn't
+  implemented. Review any pool manually before sizing up past your default
+  LP amount, especially on a brand-new/low-liquidity token.
+- **If a token turns into a honeypot *after* you're already in a position**,
+  closing still isolates the failure per-leg — see "Auto-swap on close"
+  above. The stuck leg is left in your wallet and reported, not silently
+  lost or blocking the rest of the close.
 - **The bot holds a private key and signs real transactions.** Tapping "Add
   LP now" is not a preview — it sends money. Use a **dedicated wallet**,
   funded only with what you're comfortable risking in one-tap automated
@@ -211,10 +230,12 @@ src/
     pools.rs           Discovers pools via PoolCreated events
     pricing.rs          Shared WETH/USDG pricing helpers (used by metrics, position, spike)
     metrics.rs          Computes TVL, volume, APR, age for newly discovered pools
+    honeypot.rs          Buy-then-sell round-trip simulation via Quoter
     position.rs         Uniswap V3 liquidity math + PnL computation for open positions
     spike.rs            Volume-spike detection (recent window vs. previous window)
     safety.rs          Contract-verification check via Blockscout API
     lp.rs               Builds/sends the add-liquidity and close-position transactions
+    autoswap.rs          Auto-swaps close-position proceeds into USDG (force-close on failure)
   telegram/
     mod.rs             Alerts, the "Add LP now" / "Close position" buttons, and the /positions command
   main.rs              Wires up three loops: pool discovery, Telegram dispatcher, position monitoring
@@ -222,10 +243,12 @@ src/
 
 ## Extending this
 
-- **Real honeypot/rug detection**: wire in a simulation step (e.g. quote a
-  buy then a sell through the pool via `eth_call` state overrides, or a
-  third-party honeypot-checking API once one supports this chain) before
-  trusting `require_verified_tokens` alone.
+- **More rigorous honeypot detection**: the current check (Quoter round-trip
+  simulation, see `chain/honeypot.rs`) catches the common cases but exercises
+  a simulated call path, not a real transaction from your wallet. A fully
+  rigorous check would use state-override `eth_call` simulation against your
+  specific address (or a third-party honeypot-checking API/GMGN-style
+  service, once one supports this chain).
 - **Uniswap v4 support**: would need a parallel discovery path against the
   `PoolManager` singleton and its `Initialize`/`Swap` events instead of a
   factory, plus handling pool "hooks."
