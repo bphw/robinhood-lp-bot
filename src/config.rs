@@ -64,6 +64,39 @@ pub struct ScreeningConfig {
     pub honeypot_test_amount_usd: f64,
     pub poll_interval_secs: u64,
     pub lookback_blocks_for_volume: u64,
+
+    // --- Trader interest / supply concentration / rug-risk (via GoPlus
+    // Security, chain::goplus) — all None-tolerant per require_goplus_data
+    // below. See README "GoPlus security screening" for what maps to what.
+    pub min_holder_count: u64,
+    pub min_unique_traders_24h: u64,
+    /// Fail if the top 10 holders combined hold more than this percent of
+    /// supply.
+    pub max_top10_holder_pct: f64,
+    /// Fail if the creator/deployer's own holdings exceed this percent.
+    pub max_dev_holding_pct: f64,
+    pub max_buy_tax_percent: f64,
+    pub max_sell_tax_percent: f64,
+    /// Require the contract to have no mint function reachable by a
+    /// privileged caller (GoPlus `is_mintable` == false).
+    pub require_not_mintable: bool,
+    /// Require ownership renounced (GoPlus `owner_address` is the zero
+    /// address, or there's no privileged owner at all).
+    pub require_ownership_renounced: bool,
+    /// Fail if GoPlus reports the contract as blacklist-capable or
+    /// transfer-pausable — the closest EVM equivalent to a "freeze
+    /// authority" that hasn't been revoked.
+    pub require_not_blacklistable: bool,
+    /// Minimum percent of LP GoPlus reports as locked. Set to 0 to disable
+    /// this check entirely — it's frequently unavailable for Uniswap v3
+    /// pools (see PoolMetrics::lp_locked_pct), so a nonzero threshold here
+    /// combined with require_goplus_data=true will fail most v3 pools.
+    pub min_lp_locked_pct: f64,
+    /// If true, a pool whose GoPlus data isn't available at all (common for
+    /// a token minutes old) fails every GoPlus-derived check above rather
+    /// than skipping them. If false, missing data just skips those specific
+    /// checks (the pool can still pass on TVL/volume/APR/honeypot alone).
+    pub require_goplus_data: bool,
 }
 
 #[derive(Debug, Deserialize, Clone)]

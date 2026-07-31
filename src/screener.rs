@@ -107,9 +107,189 @@ pub fn screen(candidate: PoolCandidate, cfg: &ScreeningConfig) -> ScreenResult {
         }
     }
 
+    // GoPlus's own honeypot verdict is an independent cross-check against
+    // this bot's own on-chain simulation above — a hard fail regardless of
+    // require_goplus_data, since "a reputable third party flagged this as a
+    // honeypot" shouldn't be overridable by a config toggle.
+    if m.is_honeypot_goplus == Some(true) {
+        passed = false;
+        reasons.push("GoPlus flags this token as a honeypot".to_string());
+    }
+
+    missing_or_check(
+        m.holder_count.map(|v| v as f64),
+        cfg.min_holder_count as f64,
+        true,
+        cfg,
+        &mut passed,
+        &mut reasons,
+        |v, min| format!("Holder count {v:.0} >= min {min:.0}"),
+        |v, min| format!("Holder count {v:.0} below min {min:.0}"),
+        "Holder count",
+    );
+
+    missing_or_check(
+        m.unique_traders_24h.map(|v| v as f64),
+        cfg.min_unique_traders_24h as f64,
+        true,
+        cfg,
+        &mut passed,
+        &mut reasons,
+        |v, min| format!("Unique traders (24h) {v:.0} >= min {min:.0}"),
+        |v, min| format!("Unique traders (24h) {v:.0} below min {min:.0}"),
+        "Unique traders (24h)",
+    );
+
+    missing_or_check(
+        m.top10_holder_pct,
+        cfg.max_top10_holder_pct,
+        false,
+        cfg,
+        &mut passed,
+        &mut reasons,
+        |v, max| format!("Top-10 holder concentration {v:.1}% within max {max:.1}%"),
+        |v, max| format!("Top-10 holder concentration {v:.1}% exceeds max {max:.1}%"),
+        "Top-10 holder concentration",
+    );
+
+    missing_or_check(
+        m.dev_holding_pct,
+        cfg.max_dev_holding_pct,
+        false,
+        cfg,
+        &mut passed,
+        &mut reasons,
+        |v, max| format!("Dev/creator holdings {v:.1}% within max {max:.1}%"),
+        |v, max| format!("Dev/creator holdings {v:.1}% exceeds max {max:.1}%"),
+        "Dev/creator holdings",
+    );
+
+    missing_or_check(
+        m.buy_tax_percent,
+        cfg.max_buy_tax_percent,
+        false,
+        cfg,
+        &mut passed,
+        &mut reasons,
+        |v, max| format!("Buy tax {v:.1}% within max {max:.1}%"),
+        |v, max| format!("Buy tax {v:.1}% exceeds max {max:.1}%"),
+        "Buy tax",
+    );
+
+    missing_or_check(
+        m.sell_tax_percent,
+        cfg.max_sell_tax_percent,
+        false,
+        cfg,
+        &mut passed,
+        &mut reasons,
+        |v, max| format!("Sell tax {v:.1}% within max {max:.1}%"),
+        |v, max| format!("Sell tax {v:.1}% exceeds max {max:.1}%"),
+        "Sell tax",
+    );
+
+    if cfg.require_not_mintable {
+        match m.is_mintable {
+            Some(false) => reasons.push("No privileged mint function (GoPlus)".to_string()),
+            Some(true) => {
+                passed = false;
+                reasons.push("Contract has a privileged mint function — supply could be inflated at will".to_string());
+            }
+            None => fail_or_skip_bool(cfg, &mut passed, &mut reasons, "Mintability"),
+        }
+    }
+
+    if cfg.require_ownership_renounced {
+        match m.ownership_renounced {
+            Some(true) => reasons.push("Ownership renounced / no privileged owner (GoPlus)".to_string()),
+            Some(false) => {
+                passed = false;
+                reasons.push(
+                    "Ownership NOT renounced — a privileged owner still exists (closest EVM equivalent to \
+                     an unrevoked mint/freeze authority)"
+                        .to_string(),
+                );
+            }
+            None => fail_or_skip_bool(cfg, &mut passed, &mut reasons, "Ownership-renounced status"),
+        }
+    }
+
+    if cfg.require_not_blacklistable {
+        let blacklistable = m.is_blacklistable.or(m.transfer_pausable);
+        match blacklistable {
+            Some(false) => reasons.push("No blacklist/pause function found (GoPlus)".to_string()),
+            Some(true) => {
+                passed = false;
+                reasons.push(
+                    "Contract can blacklist addresses or pause transfers — closest EVM equivalent to a \
+                     freeze authority that hasn't been revoked"
+                        .to_string(),
+                );
+            }
+            None => fail_or_skip_bool(cfg, &mut passed, &mut reasons, "Blacklist/pause capability"),
+        }
+    }
+
+    if cfg.min_lp_locked_pct > 0.0 {
+        missing_or_check(
+            m.lp_locked_pct,
+            cfg.min_lp_locked_pct,
+            true,
+            cfg,
+            &mut passed,
+            &mut reasons,
+            |v, min| format!("LP locked {v:.1}% >= min {min:.1}%"),
+            |v, min| format!("LP locked {v:.1}% below min {min:.1}% — GoPlus lock data is often unavailable for Uniswap v3 NFT positions, so this may reflect missing data rather than genuinely unlocked liquidity"),
+            "LP locked",
+        );
+    }
+
     ScreenResult {
         candidate,
         passed,
         reasons,
+    }
+}
+
+/// Shared plumbing for a GoPlus-derived numeric threshold check.
+/// `min_is_floor=true` means `value >= threshold` passes (a minimum);
+/// `false` means `value <= threshold` passes (a maximum).
+#[allow(clippy::too_many_arguments)]
+fn missing_or_check(
+    value: Option<f64>,
+    threshold: f64,
+    min_is_floor: bool,
+    cfg: &ScreeningConfig,
+    passed: &mut bool,
+    reasons: &mut Vec<String>,
+    ok_msg: impl Fn(f64, f64) -> String,
+    fail_msg: impl Fn(f64, f64) -> String,
+    label: &str,
+) {
+    match value {
+        Some(v) if (min_is_floor && v >= threshold) || (!min_is_floor && v <= threshold) => {
+            reasons.push(ok_msg(v, threshold));
+        }
+        Some(v) => {
+            *passed = false;
+            reasons.push(fail_msg(v, threshold));
+        }
+        None => {
+            if cfg.require_goplus_data {
+                *passed = false;
+                reasons.push(format!("{label} unknown (GoPlus has no data on this token yet) — failing since require_goplus_data=true"));
+            } else {
+                reasons.push(format!("{label} unknown (GoPlus has no data yet) — skipped, not counted against this pool"));
+            }
+        }
+    }
+}
+
+fn fail_or_skip_bool(cfg: &ScreeningConfig, passed: &mut bool, reasons: &mut Vec<String>, label: &str) {
+    if cfg.require_goplus_data {
+        *passed = false;
+        reasons.push(format!("{label} unknown (GoPlus has no data on this token yet) — failing since require_goplus_data=true"));
+    } else {
+        reasons.push(format!("{label} unknown (GoPlus has no data yet) — skipped, not counted against this pool"));
     }
 }

@@ -12,14 +12,23 @@ button to add liquidity to any pool that passes.
 2. For each new pool, computes:
    - **TVL** (via on-chain reserves + the pool's own price, priced against
      WETH/USDG)
+   - **Market cap (FDV)** — on-chain `total_supply` × computed USD price of
+     the non-reference token. This is fully-diluted, not "circulating" —
+     see the caveat below.
    - **24h volume estimate** (by summing `Swap` events over a lookback
-     window)
+     window), plus an **approximate unique-trader count** over the same
+     window
    - **Estimated fee APR** (`volume × fee tier ÷ TVL`, annualized)
    - **Pool age**
    - **Contract verification status** of both tokens (via Blockscout's API)
    - **Honeypot check** — simulates a small buy-then-sell round trip via
      Uniswap's Quoter; rejects the pool if the simulated sell reverts or
      loses more than `max_honeypot_loss_percent` to a hidden tax
+   - **Holder count, supply concentration, buy/sell tax, mint/ownership/
+     blacklist status, and LP-lock status** — via GoPlus Security's Token
+     Security API, which supports Robinhood Chain directly. See "GoPlus
+     security screening" below for exactly what each field means and its
+     limitations.
 3. Screens each pool against the thresholds in `config.toml`.
 4. If it passes, sends you a Telegram message with an inline **"✅ Add LP
    now"** button.
@@ -42,6 +51,61 @@ button to add liquidity to any pool that passes.
      close button, since a spike can be a reason to exit either direction).
 7. **`/positions`** (or `/pnl`) — message the bot this anytime for a live
    PnL snapshot of every open position, on demand.
+
+## GoPlus security screening
+
+Most of the "is this token safe" criteria — holder count, supply
+concentration, dev holdings, buy/sell tax, mint function, ownership,
+blacklist/pause capability, LP lock — come from
+[GoPlus Security's Token Security API](https://gopluslabs.io), called fresh
+for each new pool (`src/chain/goplus.rs`). This is far more reliable than
+hand-rolling bytecode analysis, and GoPlus does support Robinhood Chain
+directly (chain ID `4663`) as of when this was built.
+
+**Two of the criteria you might expect from Solana-token screening tools
+don't map directly onto EVM/ERC20 and are translated:**
+- "Mint authority not revoked" → `require_not_mintable`: checks for a
+  privileged mint function reachable by an owner. ERC20 has no separate
+  "authority" concept like an SPL token's mint authority — a contract
+  either has an owner-callable mint function coded in, or it doesn't.
+- "Freeze authority not revoked" → `require_not_blacklistable`: checks for
+  a blacklist or transfer-pause function. Same idea, different mechanism —
+  EVM tokens don't have a native freeze primitive, but plenty implement
+  their own via a blacklist mapping or a pausable modifier.
+
+**Real limitations, not just theoretical ones:**
+- **GoPlus needs to have indexed the token first.** A token that's minutes
+  old may have no GoPlus data yet at all. `require_goplus_data` (default
+  `true`) controls what happens then: fail every GoPlus-derived check
+  conservatively, or skip them and let the pool pass on
+  TVL/volume/APR/honeypot alone. Watch your first few real alerts and
+  adjust if `true` is rejecting too much of what's actually new/legitimate.
+- **LP-lock detection is built for Uniswap v2-style fungible LP tokens.**
+  Uniswap v3 positions are NFTs — GoPlus frequently has no lock data for
+  them at all, so `lp_locked_pct` will often be `None` even when every
+  other GoPlus field is populated. `min_lp_locked_pct` defaults to `0.0`
+  (disabled) for exactly this reason; only raise it after checking whether
+  GoPlus actually returns lock data for pools on this chain in practice.
+  `None` here means "couldn't verify," not "unlocked."
+  Combined with `require_goplus_data`, ordering matters:
+  `require_goplus_data` gates *missing token data entirely*; a nonzero
+  `min_lp_locked_pct` is a separate, additional gate specifically on the
+  LP-lock field once token data does exist.
+- **The `percent` fields' format is assumed, not independently verified**
+  against a live response for a real Robinhood Chain meme token — GoPlus's
+  own examples elsewhere (buy_tax/sell_tax) confirm ratios are expressed as
+  a fraction of 1 (e.g. `"1"` = 100%), and `top10_holder_pct`/
+  `dev_holding_pct` assume the same convention for consistency. Sanity-check
+  the first few real alerts against https://gopluslabs.io by hand.
+- **"Unique traders (24h)" counts distinct Swap-event `recipient`
+  addresses**, not `sender` — for swaps routed through SwapRouter02 (as
+  this bot's own are), `sender` is the router contract itself, which would
+  make almost every trade look like it came from the same address. Using
+  `recipient` is a reasonable proxy for the end-user wallet but can still
+  undercount on complex multi-hop routes.
+- **Market cap is fully-diluted** (`total_supply × price`), not circulating
+  supply. If a meaningful chunk of a token's supply is vested/locked
+  elsewhere, this overstates what's actually liquid in the market.
 
 ## Auto-swap on close
 

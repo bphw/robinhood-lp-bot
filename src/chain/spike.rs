@@ -47,9 +47,13 @@ pub async fn check_volume_spike(
     };
 
     let recent_volume_usd =
-        estimate_volume_usd(client.clone(), pool.address, recent_from, current_block, dec0, dec1, p0, p1).await?;
+        estimate_volume_usd(client.clone(), pool.address, recent_from, current_block, dec0, dec1, p0, p1)
+            .await?
+            .volume_usd;
     let previous_volume_usd =
-        estimate_volume_usd(client.clone(), pool.address, previous_from, recent_from.saturating_sub(1), dec0, dec1, p0, p1).await?;
+        estimate_volume_usd(client.clone(), pool.address, previous_from, recent_from.saturating_sub(1), dec0, dec1, p0, p1)
+            .await?
+            .volume_usd;
 
     if recent_volume_usd < min_meaningful_volume_usd(cfg) {
         return Ok(None);

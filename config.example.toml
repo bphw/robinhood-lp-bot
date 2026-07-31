@@ -88,6 +88,31 @@ poll_interval_secs = 120
 # shorter (less accurate) volume window.
 lookback_blocks_for_volume = 864000
 
+# --- Trader interest / supply concentration / rug-risk, via GoPlus Security
+# (chain::goplus). GoPlus supports Robinhood Chain directly (chain ID 4663).
+# Note two of these are EVM translations of Solana-style checks, since
+# "freeze/mint authority" isn't a native ERC20 concept:
+#   - require_not_mintable       ~ "mint authority not revoked"
+#   - require_not_blacklistable  ~ "freeze authority not revoked"
+min_holder_count = 50
+min_unique_traders_24h = 15
+max_top10_holder_pct = 60.0
+max_dev_holding_pct = 15.0
+max_buy_tax_percent = 10.0
+max_sell_tax_percent = 10.0
+require_not_mintable = true
+require_ownership_renounced = true
+require_not_blacklistable = true
+# GoPlus LP-lock data is frequently unavailable for Uniswap v3 pools (v3
+# positions are NFTs, not the fungible LP tokens this check is built
+# around) — set to 0 to disable if it's failing most pools on missing data
+# rather than genuinely unlocked liquidity. Check a few real alerts first.
+min_lp_locked_pct = 0.0
+# If a token is too new for GoPlus to have indexed yet, should every
+# GoPlus-derived check above fail (true, conservative) or just get skipped
+# (false, so the pool can still pass on TVL/volume/APR/honeypot alone)?
+require_goplus_data = true
+
 [monitoring]
 # Close (with a Telegram confirmation button) once a position's PnL hits
 # either of these.

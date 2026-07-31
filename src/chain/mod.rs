@@ -1,5 +1,6 @@
 pub mod abi;
 pub mod autoswap;
+pub mod goplus;
 pub mod honeypot;
 pub mod lp;
 pub mod metrics;

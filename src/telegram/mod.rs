@@ -26,11 +26,38 @@ fn format_alert(result: &ScreenResult) -> String {
     if let Some(tvl) = m.tvl_usd {
         lines.push(format!("*TVL:* ${:.0}", tvl));
     }
+    if let Some(mcap) = m.market_cap_usd {
+        lines.push(format!("*Market cap (FDV):* ${:.0}", mcap));
+    }
     if let Some(v) = m.volume_24h_usd {
         lines.push(format!("*24h volume:* ${:.0}", v));
     }
     if let Some(apr) = m.apr_percent {
         lines.push(format!("*Est. fee APR:* {:.1}%", apr));
+    }
+    if let Some(holders) = m.holder_count {
+        lines.push(format!("*Holders:* {holders}"));
+    }
+    if let Some(traders) = m.unique_traders_24h {
+        lines.push(format!("*Unique traders (24h, approx.):* {traders}"));
+    }
+    if let Some(top10) = m.top10_holder_pct {
+        lines.push(format!("*Top-10 holders:* {top10:.1}% of supply"));
+    }
+    if let Some(dev) = m.dev_holding_pct {
+        lines.push(format!("*Dev/creator holdings:* {dev:.1}%"));
+    }
+    if let (Some(buy), Some(sell)) = (m.buy_tax_percent, m.sell_tax_percent) {
+        lines.push(format!("*Buy/sell tax:* {buy:.1}% / {sell:.1}%"));
+    }
+    if let Some(renounced) = m.ownership_renounced {
+        lines.push(format!("*Ownership renounced:* {}", if renounced { "yes" } else { "⚠️ no" }));
+    }
+    if let Some(mintable) = m.is_mintable {
+        lines.push(format!("*Mintable:* {}", if mintable { "⚠️ yes" } else { "no" }));
+    }
+    if let Some(lp_locked) = m.lp_locked_pct {
+        lines.push(format!("*LP locked (GoPlus):* {lp_locked:.1}%"));
     }
     if let (Some(true), Some(loss)) = (m.honeypot_sellable, m.honeypot_round_trip_loss_percent) {
         lines.push(format!("*Honeypot check:* passed (simulated round-trip loss {:.1}%)", loss));

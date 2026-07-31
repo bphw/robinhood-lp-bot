@@ -29,6 +29,35 @@ pub struct PoolMetrics {
     /// tvl_usd/volume_24h_usd/apr_percent being None).
     pub honeypot_sellable: Option<bool>,
     pub honeypot_round_trip_loss_percent: Option<f64>,
+
+    /// Fully-diluted market cap: on-chain total_supply of the non-reference
+    /// token × its computed USD price. Not "circulating" market cap — if a
+    /// meaningful chunk of supply is locked/vested elsewhere, this overstates
+    /// what's actually liquid.
+    pub market_cap_usd: Option<f64>,
+    /// Distinct `recipient` addresses across Swap events in the same
+    /// lookback window as volume_24h_usd. An approximation of unique
+    /// traders, not exact — see chain::metrics for the caveat on why
+    /// `recipient` rather than `sender` is used.
+    pub unique_traders_24h: Option<u64>,
+
+    // --- GoPlus Security fields (chain::goplus) — all None if GoPlus has no
+    // data yet for this token, which is common for a very new/tiny one. ---
+    pub holder_count: Option<u64>,
+    pub top10_holder_pct: Option<f64>,
+    pub dev_holding_pct: Option<f64>,
+    pub buy_tax_percent: Option<f64>,
+    pub sell_tax_percent: Option<f64>,
+    pub is_mintable: Option<bool>,
+    pub ownership_renounced: Option<bool>,
+    pub is_honeypot_goplus: Option<bool>,
+    pub is_blacklistable: Option<bool>,
+    pub transfer_pausable: Option<bool>,
+    /// Percent of LP locked, per GoPlus. Frequently None for Uniswap v3
+    /// pools even when other GoPlus fields are populated — v3 positions are
+    /// NFTs, not the fungible LP tokens GoPlus's lock-detection is built
+    /// around. None means "couldn't verify," not "unlocked."
+    pub lp_locked_pct: Option<f64>,
 }
 
 #[derive(Debug, Clone)]
