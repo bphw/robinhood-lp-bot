@@ -40,8 +40,16 @@ pub struct TokenInfo {
 #[serde(rename_all = "camelCase")]
 pub struct TokenInfoExtra {
     pub image_url: Option<String>,
-    pub websites: Option<Vec<String>>,
+    pub header: Option<String>,
+    pub open_graph: Option<String>,
+    pub websites: Option<Vec<Website>>,
     pub socials: Option<Vec<SocialLink>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Website {
+    pub url: String,
+    pub label: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
