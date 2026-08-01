@@ -658,7 +658,11 @@ async fn handle_dexscreener_command(
             let emoji = if pc >= 0.0 { "🟢" } else { "🔴" };
             lines.push(format!("*24h change:* {} {:.2}%", emoji, pc));
         }
-        lines.push(format!("*Liquidity:* ${:.0}", p.liquidity.usd));
+        if let Some(liq) = &p.liquidity {
+            lines.push(format!("*Liquidity:* ${:.0}", liq.usd));
+        } else {
+            lines.push("*Liquidity:* N/A".to_string());
+        }
         lines.push(format!("*24h Volume:* ${:.0}", p.volume.h24));
         if let Some(fdv) = p.fdv {
             lines.push(format!("*FDV:* ${:.0}", fdv));

@@ -21,7 +21,7 @@ pub struct DexScreenerPair {
     pub txns: Txns,
     pub volume: Volume,
     pub price_change: PriceChange,
-    pub liquidity: Liquidity,
+    pub liquidity: Option<Liquidity>,
     pub fdv: Option<f64>,
     pub market_cap: Option<f64>,
     pub pair_created_at: Option<u64>,
@@ -186,11 +186,13 @@ pub async fn compute_metrics_with_fallback(
                 .map(|ms| (current_timestamp as f64 - (ms as f64 / 1000.0)) / 3600.0)
                 .unwrap_or(0.0);
             let fee_pct = pool.fee as f64 / 10_000.0;
-            let apr = if ds.liquidity.usd > 0.0 {
-                Some((ds.volume.h24 * fee_pct / 100.0) / ds.liquidity.usd * 365.0 * 100.0)
-            } else {
-                None
-            };
+            let apr = ds.liquidity.as_ref().and_then(|liq| {
+                if liq.usd > 0.0 {
+                    Some((ds.volume.h24 * fee_pct / 100.0) / liq.usd * 365.0 * 100.0)
+                } else {
+                    None
+                }
+            });
             let base_addr = ds
                 .base_token
                 .address
@@ -204,7 +206,7 @@ pub async fn compute_metrics_with_fallback(
             PoolMetrics {
                 token0_symbol: token0_sym,
                 token1_symbol: token1_sym,
-                tvl_usd: Some(ds.liquidity.usd),
+                tvl_usd: ds.liquidity.as_ref().map(|liq| liq.usd),
                 volume_24h_usd: Some(ds.volume.h24),
                 apr_percent: apr,
                 age_hours,
