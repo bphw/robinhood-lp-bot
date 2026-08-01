@@ -58,6 +58,31 @@ pub struct PoolMetrics {
     /// NFTs, not the fungible LP tokens GoPlus's lock-detection is built
     /// around. None means "couldn't verify," not "unlocked."
     pub lp_locked_pct: Option<f64>,
+
+    // --- GeckoTerminal Security fields (chain::geckoterminal) — all None
+    // if GeckoTerminal has no data for this token (chain not supported,
+    // token too new, rate-limited, etc.). GoPlus fields above act as
+    // fallback when these are None. ---
+    /// Overall GeckoTerminal trust score, 0-100.
+    pub gt_score: Option<f64>,
+    pub gt_score_pool: Option<f64>,
+    pub gt_score_transaction: Option<f64>,
+    pub gt_score_creation: Option<f64>,
+    pub gt_score_info: Option<f64>,
+    pub gt_score_holders: Option<f64>,
+    pub gt_verified: Option<bool>,
+    /// GeckoTerminal's own honeypot verdict (independent of on-chain sim).
+    pub gecko_is_honeypot: Option<bool>,
+    /// Mint authority address if found; None = no mint authority.
+    pub gecko_mint_authority: Option<String>,
+    /// Freeze authority address if found; None = no freeze authority.
+    pub gecko_freeze_authority: Option<String>,
+    pub gecko_developer_address: Option<String>,
+    pub gecko_developer_holding_pct: Option<f64>,
+    /// GeckoTerminal holder count (may differ from GoPlus).
+    pub gecko_holder_count: Option<u64>,
+    /// GeckoTerminal top-10 holder concentration (may differ from GoPlus).
+    pub gecko_top10_holder_pct: Option<f64>,
 }
 
 #[derive(Debug, Clone)]

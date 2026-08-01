@@ -2,10 +2,12 @@ use crate::chain::lp::{add_liquidity, close_position};
 use crate::chain::position::compute_pnl;
 use crate::chain::ChainClient;
 use crate::config::AppConfig;
-use crate::models::{Position, ScreenResult, VolumeSpike};
+use crate::models::{PoolCandidate, Position, ScreenResult, VolumeSpike};
 use anyhow::Result;
+use ethers::middleware::Middleware;
 use ethers::types::Address;
 use std::str::FromStr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use teloxide::prelude::*;
 use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup};
@@ -193,6 +195,7 @@ pub async fn run_bot(
     cfg: Arc<AppConfig>,
     client: Arc<ChainClient>,
     storage: Arc<Mutex<Storage>>,
+    screening_enabled: Arc<AtomicBool>,
 ) -> Result<()> {
     let cfg_cb = cfg.clone();
     let client_cb = client.clone();
@@ -225,10 +228,12 @@ pub async fn run_bot(
     let cfg_msg = cfg.clone();
     let client_msg = client.clone();
     let storage_msg = storage.clone();
+    let screening_msg = screening_enabled.clone();
     let message_handler = Update::filter_message().endpoint(move |bot: Bot, msg: Message| {
         let cfg = cfg_msg.clone();
         let client = client_msg.clone();
         let storage = storage_msg.clone();
+        let screening = screening_msg.clone();
         async move {
             if !is_owner(&cfg, msg.chat.id.0) {
                 log::warn!(
@@ -239,9 +244,22 @@ pub async fn run_bot(
             }
 
             if let Some(text) = msg.text() {
-                if text.trim().starts_with("/positions") || text.trim().starts_with("/pnl") {
-                    if let Err(e) = handle_positions_command(&bot, msg.chat.id, &cfg, client, storage).await {
+                let trimmed = text.trim();
+                if trimmed.starts_with("/positions") || trimmed.starts_with("/pnl") {
+                    if let Err(e) = handle_positions_command(&bot, msg.chat.id, &cfg, client.clone(), storage.clone()).await {
                         log::error!("Failed to handle /positions: {e:?}");
+                    }
+                } else if trimmed.starts_with("/check") {
+                    if let Err(e) = handle_check_command(&bot, msg.chat.id, &cfg, client.clone(), storage.clone(), trimmed).await {
+                        log::error!("Failed to handle /check: {e:?}");
+                    }
+                } else if trimmed == "/toggle_screening" || trimmed == "/toggle" {
+                    if let Err(e) = handle_toggle_command(&bot, msg.chat.id, &cfg, trimmed, screening.clone()).await {
+                        log::error!("Failed to handle /toggle_screening: {e:?}");
+                    }
+                } else if trimmed == "/screening_status" || trimmed == "/status" {
+                    if let Err(e) = handle_status_command(&bot, msg.chat.id, &cfg).await {
+                        log::error!("Failed to handle /screening_status: {e:?}");
                     }
                 }
             }
@@ -416,4 +434,191 @@ async fn handle_close_tap(
             }
         }
     }
+}
+
+/// Manual pool verification: user pastes a contract address and the bot
+/// scores it the same way the auto-screener does.
+async fn handle_check_command(
+    bot: &Bot,
+    chat_id: ChatId,
+    cfg: &Arc<AppConfig>,
+    client: Arc<ChainClient>,
+    storage: Arc<Mutex<Storage>>,
+    text: &str,
+) -> Result<()> {
+    let parts: Vec<&str> = text.split_whitespace().collect();
+    if parts.len() < 2 {
+        bot.send_message(chat_id, "Usage: `/check <pool_address>`\nExample: `/check 0x1234…abcd`").parse_mode(teloxide::types::ParseMode::Markdown).await?;
+        return Ok(());
+    }
+
+    let pool_hex = parts[1].trim();
+    let pool_addr = match Address::from_str(pool_hex) {
+        Ok(a) => a,
+        Err(_) => {
+            bot.send_message(chat_id, format!("❌ Invalid address: `{pool_hex}`")).parse_mode(teloxide::types::ParseMode::Markdown).await?;
+            return Ok(());
+        }
+    };
+
+    let _ = bot.send_message(chat_id, format!("🔍 Looking up pool `{pool_hex}`…")).parse_mode(teloxide::types::ParseMode::Markdown).await;
+
+    let pool_info = match crate::chain::pools::lookup_pool_by_address(client.clone(), pool_addr).await {
+        Ok(p) => p,
+        Err(e) => {
+            bot.send_message(chat_id, format!("❌ Could not read pool contract `{pool_hex}`:\n`{e}`")).parse_mode(teloxide::types::ParseMode::Markdown).await?;
+            return Ok(());
+        }
+    };
+
+    let latest_block = match client.get_block_number().await {
+        Ok(b) => b.as_u64(),
+        Err(_) => 0,
+    };
+    let now_ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
+
+    // Try DexScreener first for accurate TVL / volume / age.
+    let mut metrics = match crate::chain::dexscreener::fetch_pair("robinhood", pool_hex).await {
+        Ok(Some(ds)) => {
+            let age_hours = ds.pair_created_at.map(|ms| (now_ts as f64 - (ms as f64 / 1000.0)) / 3600.0).unwrap_or(0.0);
+            let fee_pct = pool_info.fee as f64 / 10_000.0;
+            let apr = if ds.liquidity.usd > 0.0 {
+                Some((ds.volume.h24 * fee_pct / 100.0) / ds.liquidity.usd * 365.0 * 100.0)
+            } else {
+                None
+            };
+            let base_addr = ds.base_token.address.parse::<ethers::types::Address>().unwrap_or_default();
+            let (token0_sym, token1_sym) = if pool_info.token0 == base_addr {
+                (ds.base_token.symbol.clone(), ds.quote_token.symbol.clone())
+            } else {
+                (ds.quote_token.symbol.clone(), ds.base_token.symbol.clone())
+            };
+            crate::models::PoolMetrics {
+                token0_symbol: token0_sym,
+                token1_symbol: token1_sym,
+                tvl_usd: Some(ds.liquidity.usd),
+                volume_24h_usd: Some(ds.volume.h24),
+                apr_percent: apr,
+                age_hours,
+                token0_verified: Some(true),
+                token1_verified: Some(true),
+                ..Default::default()
+            }
+        }
+        Ok(None) | Err(_) => {
+            // Fallback to on-chain metrics.
+            match crate::chain::metrics::compute_metrics(client.clone(), cfg, &pool_info, latest_block, now_ts).await {
+                Ok(m) => m,
+                Err(e) => {
+                    bot.send_message(chat_id, format!("❌ Failed to compute metrics for `{pool_hex}`:\n`{e}`")).parse_mode(teloxide::types::ParseMode::Markdown).await?;
+                    return Ok(());
+                }
+            }
+        }
+    };
+
+    let candidate = PoolCandidate { info: pool_info.clone(), metrics };
+    let result = crate::screener::screen(candidate, &cfg.screening);
+
+    let mut lines = vec![
+        format!("*Pool:* `{pool_hex}`"),
+        format!("*Pair:* {}/{} (fee {:.2}%)", result.candidate.metrics.token0_symbol, result.candidate.metrics.token1_symbol, pool_info.fee as f64 / 10_000.0),
+    ];
+    if let Some(tvl) = result.candidate.metrics.tvl_usd {
+        lines.push(format!("*TVL:* ${:.0}", tvl));
+    }
+    if let Some(v) = result.candidate.metrics.volume_24h_usd {
+        lines.push(format!("*24h volume:* ${:.0}", v));
+    }
+    if let Some(apr) = result.candidate.metrics.apr_percent {
+        lines.push(format!("*Est. fee APR:* {:.1}%", apr));
+    }
+    lines.push(format!("*Age:* {:.1}h", result.candidate.metrics.age_hours));
+    lines.push(format!("*Token0 verified:* {}", if result.candidate.metrics.token0_verified.unwrap_or(false) { "✅" } else { "❌" }));
+    lines.push(format!("*Token1 verified:* {}", if result.candidate.metrics.token1_verified.unwrap_or(false) { "✅" } else { "❌" }));
+    lines.push(String::new());
+
+    if result.passed {
+        lines.push("🟢 *PASSED screening*".to_string());
+    } else {
+        lines.push("🔴 *FAILED screening*".to_string());
+    }
+    lines.push("*Reasons:*".to_string());
+    for r in &result.reasons {
+        lines.push(format!("• {r}"));
+    }
+
+    let reply_text = lines.join("\n");
+
+    if result.passed {
+        let keyboard = InlineKeyboardMarkup::new(vec![vec![InlineKeyboardButton::callback(
+            "✅ Add LP now",
+            format!("addlp:{pool_hex}"),
+        )]]);
+        bot.send_message(chat_id, reply_text)
+            .parse_mode(teloxide::types::ParseMode::Markdown)
+            .reply_markup(keyboard)
+            .await?;
+    } else {
+        bot.send_message(chat_id, reply_text)
+            .parse_mode(teloxide::types::ParseMode::Markdown)
+            .await?;
+    }
+
+    // Mark as alerted so the auto-screener doesn't duplicate-alert later.
+    let mut s = storage.lock().await;
+    let _ = s.mark_alerted(pool_addr);
+
+    Ok(())
+}
+
+async fn handle_toggle_command(
+    bot: &Bot,
+    chat_id: ChatId,
+    _cfg: &Arc<AppConfig>,
+    _text: &str,
+    screening_enabled: Arc<AtomicBool>,
+) -> Result<()> {
+    let current = screening_enabled.load(Ordering::Relaxed);
+    let new_val = !current;
+    screening_enabled.store(new_val, Ordering::Relaxed);
+
+    let status = if new_val { "🟢 ON" } else { "🔴 OFF" };
+    let msg = if new_val {
+        format!("{status}\n\nAuto-screening is now *enabled*. The bot will discover and screen new pools every {}s.", _cfg.screening.poll_interval_secs)
+    } else {
+        format!("{status}\n\nAuto-screening is now *disabled*. Use `/check <pool_address>` to manually verify any pool before adding LP.")
+    };
+
+    bot.send_message(chat_id, msg).parse_mode(teloxide::types::ParseMode::Markdown).await?;
+    Ok(())
+}
+
+async fn handle_status_command(
+    bot: &Bot,
+    chat_id: ChatId,
+    cfg: &Arc<AppConfig>,
+) -> Result<()> {
+    let lines = vec![
+        "*Bot status:*".to_string(),
+        String::new(),
+        format!("*Auto-screening:* {}", if cfg.screening.enabled { "🟢 ON" } else { "🔴 OFF" }),
+        format!("*Poll interval:* {}s", cfg.screening.poll_interval_secs),
+        format!("*Min TVL:* ${:.0}", cfg.screening.min_tvl_usd),
+        format!("*Min volume:* ${:.0}", cfg.screening.min_volume_24h_usd),
+        format!("*Min APR:* {:.0}%", cfg.screening.min_apr_percent),
+        format!("*Max APR:* {:.0}%", cfg.screening.max_apr_percent),
+        format!("*Min age:* {:.0}h", cfg.screening.min_pool_age_hours),
+        format!("*Verified tokens required:* {}", if cfg.screening.require_verified_tokens { "yes" } else { "no" }),
+        String::new(),
+        "*Commands:*".to_string(),
+        "`/check <address>` — score a pool manually".to_string(),
+        "`/toggle_screening` — flip auto-screening on/off".to_string(),
+        "`/positions` — list open positions".to_string(),
+    ];
+
+    bot.send_message(chat_id, lines.join("\n"))
+        .parse_mode(teloxide::types::ParseMode::Markdown)
+        .await?;
+    Ok(())
 }

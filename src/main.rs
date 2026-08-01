@@ -9,6 +9,7 @@ use crate::config::AppConfig;
 use crate::models::PoolCandidate;
 use anyhow::Result;
 use ethers::middleware::Middleware;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use teloxide::prelude::*;
@@ -24,32 +25,39 @@ async fn main() -> Result<()> {
     let chat_id = ChatId(cfg.telegram.chat_id);
 
     let storage = Arc::new(Mutex::new(storage::Storage::load_or_default("state.json")?));
+    let screening_enabled = Arc::new(AtomicBool::new(cfg.screening.enabled));
 
     // Task 1: listen for Telegram button taps ("Add LP now" / "Close
     // position") and the /positions command.
     let bot_cfg = cfg.clone();
     let bot_client = client.clone();
     let bot_storage = storage.clone();
+    let bot_screening = screening_enabled.clone();
     let bot_for_listener = bot.clone();
     tokio::spawn(async move {
-        if let Err(e) = telegram::run_bot(bot_for_listener, bot_cfg, bot_client, bot_storage).await {
+        if let Err(e) = telegram::run_bot(bot_for_listener, bot_cfg, bot_client, bot_storage, bot_screening).await {
             log::error!("Telegram bot stopped: {e:?}");
         }
     });
 
-    // Task 2: pool discovery + screening loop (unchanged from before).
+    // Task 2: pool discovery + screening loop (skips when screening is disabled).
     let scan_cfg = cfg.clone();
     let scan_client = client.clone();
     let scan_bot = bot.clone();
     let scan_storage = storage.clone();
+    let scan_screening = screening_enabled.clone();
     tokio::spawn(async move {
         log::info!(
             "Starting screening loop (poll interval: {}s)",
             scan_cfg.screening.poll_interval_secs
         );
         loop {
-            if let Err(e) = run_scan_cycle(&scan_cfg, scan_client.clone(), &scan_bot, chat_id, scan_storage.clone()).await {
-                log::error!("Scan cycle failed: {e:?}");
+            if scan_screening.load(Ordering::Relaxed) {
+                if let Err(e) = run_scan_cycle(&scan_cfg, scan_client.clone(), &scan_bot, chat_id, scan_storage.clone()).await {
+                    log::error!("Scan cycle failed: {e:?}");
+                }
+            } else {
+                log::info!("Auto-screening is disabled — skipping scan cycle. Use /toggle_screening to re-enable.");
             }
             tokio::time::sleep(Duration::from_secs(scan_cfg.screening.poll_interval_secs)).await;
         }

@@ -46,6 +46,7 @@ pub struct WalletConfig {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct ScreeningConfig {
+    pub enabled: bool,
     pub min_tvl_usd: f64,
     pub min_volume_24h_usd: f64,
     pub min_apr_percent: f64,
@@ -97,6 +98,25 @@ pub struct ScreeningConfig {
     /// than skipping them. If false, missing data just skips those specific
     /// checks (the pool can still pass on TVL/volume/APR/honeypot alone).
     pub require_goplus_data: bool,
+    /// Temporarily hide GoPlus security checks and omit them from Telegram
+    /// responses. When true, GoPlus is neither fetched nor mentioned.
+    pub hide_goplus: bool,
+
+    // --- GeckoTerminal Security scoring (chain::geckoterminal) — used as
+    // primary source when available, with GoPlus as fallback. ---
+    /// Minimum overall gt_score (0-100) to pass. Set to 0 to disable.
+    pub min_gt_score: f64,
+    /// If true, require gt_verified == true (project submitted verified
+    /// info to GeckoTerminal).
+    pub require_gt_verified: bool,
+    /// Which GeckoTerminal network ID to query (e.g. "eth", "bsc"). Set to
+    /// the same chain as your LP bot, or to a parent chain if the token
+    /// also exists there. Use "" to skip GeckoTerminal entirely.
+    pub gecko_network_id: String,
+    /// Temporarily hide GeckoTerminal security checks and omit them from
+    /// Telegram responses. When true, GeckoTerminal is neither fetched
+    /// nor mentioned.
+    pub hide_geckoterminal: bool,
 }
 
 #[derive(Debug, Deserialize, Clone)]

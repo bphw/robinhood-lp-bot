@@ -111,137 +111,192 @@ pub fn screen(candidate: PoolCandidate, cfg: &ScreeningConfig) -> ScreenResult {
     // this bot's own on-chain simulation above — a hard fail regardless of
     // require_goplus_data, since "a reputable third party flagged this as a
     // honeypot" shouldn't be overridable by a config toggle.
-    if m.is_honeypot_goplus == Some(true) {
+    if !cfg.hide_goplus && m.is_honeypot_goplus == Some(true) {
         passed = false;
         reasons.push("GoPlus flags this token as a honeypot".to_string());
     }
 
-    missing_or_check(
-        m.holder_count.map(|v| v as f64),
-        cfg.min_holder_count as f64,
-        true,
-        cfg,
-        &mut passed,
-        &mut reasons,
-        |v, min| format!("Holder count {v:.0} >= min {min:.0}"),
-        |v, min| format!("Holder count {v:.0} below min {min:.0}"),
-        "Holder count",
-    );
-
-    missing_or_check(
-        m.unique_traders_24h.map(|v| v as f64),
-        cfg.min_unique_traders_24h as f64,
-        true,
-        cfg,
-        &mut passed,
-        &mut reasons,
-        |v, min| format!("Unique traders (24h) {v:.0} >= min {min:.0}"),
-        |v, min| format!("Unique traders (24h) {v:.0} below min {min:.0}"),
-        "Unique traders (24h)",
-    );
-
-    missing_or_check(
-        m.top10_holder_pct,
-        cfg.max_top10_holder_pct,
-        false,
-        cfg,
-        &mut passed,
-        &mut reasons,
-        |v, max| format!("Top-10 holder concentration {v:.1}% within max {max:.1}%"),
-        |v, max| format!("Top-10 holder concentration {v:.1}% exceeds max {max:.1}%"),
-        "Top-10 holder concentration",
-    );
-
-    missing_or_check(
-        m.dev_holding_pct,
-        cfg.max_dev_holding_pct,
-        false,
-        cfg,
-        &mut passed,
-        &mut reasons,
-        |v, max| format!("Dev/creator holdings {v:.1}% within max {max:.1}%"),
-        |v, max| format!("Dev/creator holdings {v:.1}% exceeds max {max:.1}%"),
-        "Dev/creator holdings",
-    );
-
-    missing_or_check(
-        m.buy_tax_percent,
-        cfg.max_buy_tax_percent,
-        false,
-        cfg,
-        &mut passed,
-        &mut reasons,
-        |v, max| format!("Buy tax {v:.1}% within max {max:.1}%"),
-        |v, max| format!("Buy tax {v:.1}% exceeds max {max:.1}%"),
-        "Buy tax",
-    );
-
-    missing_or_check(
-        m.sell_tax_percent,
-        cfg.max_sell_tax_percent,
-        false,
-        cfg,
-        &mut passed,
-        &mut reasons,
-        |v, max| format!("Sell tax {v:.1}% within max {max:.1}%"),
-        |v, max| format!("Sell tax {v:.1}% exceeds max {max:.1}%"),
-        "Sell tax",
-    );
-
-    if cfg.require_not_mintable {
-        match m.is_mintable {
-            Some(false) => reasons.push("No privileged mint function (GoPlus)".to_string()),
-            Some(true) => {
-                passed = false;
-                reasons.push("Contract has a privileged mint function — supply could be inflated at will".to_string());
+    if !cfg.hide_geckoterminal {
+        // --- GeckoTerminal weighted score check ---
+        if cfg.min_gt_score > 0.0 {
+            match m.gt_score {
+                Some(score) if score >= cfg.min_gt_score => {
+                    reasons.push(format!(
+                        "GeckoTerminal gt_score {:.1} >= min {:.1} (components: pool={:.0} tx={:.0} creation={:.0} info={:.0} holders={:.0})",
+                        score,
+                        cfg.min_gt_score,
+                        m.gt_score_pool.unwrap_or(0.0),
+                        m.gt_score_transaction.unwrap_or(0.0),
+                        m.gt_score_creation.unwrap_or(0.0),
+                        m.gt_score_info.unwrap_or(0.0),
+                        m.gt_score_holders.unwrap_or(0.0),
+                    ));
+                }
+                Some(score) => {
+                    passed = false;
+                    reasons.push(format!(
+                        "GeckoTerminal gt_score {:.1} below min {:.1} — weighted security score too low",
+                        score, cfg.min_gt_score
+                    ));
+                }
+                None => {
+                    // No GeckoTerminal data: skip if gt_score check is configured but
+                    // data is missing. Don't hard-fail here since GoPlus fallback
+                    // handles the same underlying risks.
+                    reasons.push("GeckoTerminal gt_score unavailable — skipping (GoPlus fallback active)".to_string());
+                }
             }
-            None => fail_or_skip_bool(cfg, &mut passed, &mut reasons, "Mintability"),
+        }
+
+        if cfg.require_gt_verified {
+            match m.gt_verified {
+                Some(true) => reasons.push("GeckoTerminal verified ✓".to_string()),
+                Some(false) => {
+                    passed = false;
+                    reasons.push("GeckoTerminal NOT verified — project hasn't submitted verified info".to_string());
+                }
+                None => {
+                    reasons.push("GeckoTerminal verification status unknown — skipped".to_string());
+                }
+            }
+        }
+
+        // Also use GeckoTerminal's own honeypot flag as an independent cross-check
+        // (same rationale as GoPlus honeypot above).
+        if m.gecko_is_honeypot == Some(true) {
+            passed = false;
+            reasons.push("GeckoTerminal flags this token as a honeypot".to_string());
         }
     }
 
-    if cfg.require_ownership_renounced {
-        match m.ownership_renounced {
-            Some(true) => reasons.push("Ownership renounced / no privileged owner (GoPlus)".to_string()),
-            Some(false) => {
-                passed = false;
-                reasons.push(
-                    "Ownership NOT renounced — a privileged owner still exists (closest EVM equivalent to \
-                     an unrevoked mint/freeze authority)"
-                        .to_string(),
-                );
-            }
-            None => fail_or_skip_bool(cfg, &mut passed, &mut reasons, "Ownership-renounced status"),
-        }
-    }
-
-    if cfg.require_not_blacklistable {
-        let blacklistable = m.is_blacklistable.or(m.transfer_pausable);
-        match blacklistable {
-            Some(false) => reasons.push("No blacklist/pause function found (GoPlus)".to_string()),
-            Some(true) => {
-                passed = false;
-                reasons.push(
-                    "Contract can blacklist addresses or pause transfers — closest EVM equivalent to a \
-                     freeze authority that hasn't been revoked"
-                        .to_string(),
-                );
-            }
-            None => fail_or_skip_bool(cfg, &mut passed, &mut reasons, "Blacklist/pause capability"),
-        }
-    }
-
-    if cfg.min_lp_locked_pct > 0.0 {
+    if !cfg.hide_goplus {
         missing_or_check(
-            m.lp_locked_pct,
-            cfg.min_lp_locked_pct,
+            m.holder_count.map(|v| v as f64),
+            cfg.min_holder_count as f64,
             true,
             cfg,
             &mut passed,
             &mut reasons,
-            |v, min| format!("LP locked {v:.1}% >= min {min:.1}%"),
-            |v, min| format!("LP locked {v:.1}% below min {min:.1}% — GoPlus lock data is often unavailable for Uniswap v3 NFT positions, so this may reflect missing data rather than genuinely unlocked liquidity"),
-            "LP locked",
+            |v, min| format!("Holder count {v:.0} >= min {min:.0}"),
+            |v, min| format!("Holder count {v:.0} below min {min:.0}"),
+            "Holder count",
         );
+
+        missing_or_check(
+            m.unique_traders_24h.map(|v| v as f64),
+            cfg.min_unique_traders_24h as f64,
+            true,
+            cfg,
+            &mut passed,
+            &mut reasons,
+            |v, min| format!("Unique traders (24h) {v:.0} >= min {min:.0}"),
+            |v, min| format!("Unique traders (24h) {v:.0} below min {min:.0}"),
+            "Unique traders (24h)",
+        );
+
+        missing_or_check(
+            m.top10_holder_pct,
+            cfg.max_top10_holder_pct,
+            false,
+            cfg,
+            &mut passed,
+            &mut reasons,
+            |v, max| format!("Top-10 holder concentration {v:.1}% within max {max:.1}%"),
+            |v, max| format!("Top-10 holder concentration {v:.1}% exceeds max {max:.1}%"),
+            "Top-10 holder concentration",
+        );
+
+        missing_or_check(
+            m.dev_holding_pct,
+            cfg.max_dev_holding_pct,
+            false,
+            cfg,
+            &mut passed,
+            &mut reasons,
+            |v, max| format!("Dev/creator holdings {v:.1}% within max {max:.1}%"),
+            |v, max| format!("Dev/creator holdings {v:.1}% exceeds max {max:.1}%"),
+            "Dev/creator holdings",
+        );
+
+        missing_or_check(
+            m.buy_tax_percent,
+            cfg.max_buy_tax_percent,
+            false,
+            cfg,
+            &mut passed,
+            &mut reasons,
+            |v, max| format!("Buy tax {v:.1}% within max {max:.1}%"),
+            |v, max| format!("Buy tax {v:.1}% exceeds max {max:.1}%"),
+            "Buy tax",
+        );
+
+        missing_or_check(
+            m.sell_tax_percent,
+            cfg.max_sell_tax_percent,
+            false,
+            cfg,
+            &mut passed,
+            &mut reasons,
+            |v, max| format!("Sell tax {v:.1}% within max {max:.1}%"),
+            |v, max| format!("Sell tax {v:.1}% exceeds max {max:.1}%"),
+            "Sell tax",
+        );
+
+        if cfg.require_not_mintable {
+            match m.is_mintable {
+                Some(false) => reasons.push("No privileged mint function (GoPlus)".to_string()),
+                Some(true) => {
+                    passed = false;
+                    reasons.push("Contract has a privileged mint function — supply could be inflated at will".to_string());
+                }
+                None => fail_or_skip_bool(cfg, &mut passed, &mut reasons, "Mintability"),
+            }
+        }
+
+        if cfg.require_ownership_renounced {
+            match m.ownership_renounced {
+                Some(true) => reasons.push("Ownership renounced / no privileged owner (GoPlus)".to_string()),
+                Some(false) => {
+                    passed = false;
+                    reasons.push(
+                        "Ownership NOT renounced — a privileged owner still exists (closest EVM equivalent to \
+                         an unrevoked mint/freeze authority)"
+                            .to_string(),
+                    );
+                }
+                None => fail_or_skip_bool(cfg, &mut passed, &mut reasons, "Ownership-renounced status"),
+            }
+        }
+
+        if cfg.require_not_blacklistable {
+            let blacklistable = m.is_blacklistable.or(m.transfer_pausable);
+            match blacklistable {
+                Some(false) => reasons.push("No blacklist/pause function found (GoPlus)".to_string()),
+                Some(true) => {
+                    passed = false;
+                    reasons.push(
+                        "Contract can blacklist addresses or pause transfers — closest EVM equivalent to a \
+                         freeze authority that hasn't been revoked"
+                            .to_string(),
+                    );
+                }
+                None => fail_or_skip_bool(cfg, &mut passed, &mut reasons, "Blacklist/pause capability"),
+            }
+        }
+
+        if cfg.min_lp_locked_pct > 0.0 {
+            missing_or_check(
+                m.lp_locked_pct,
+                cfg.min_lp_locked_pct,
+                true,
+                cfg,
+                &mut passed,
+                &mut reasons,
+                |v, min| format!("LP locked {v:.1}% >= min {min:.1}%"),
+                |v, min| format!("LP locked {v:.1}% below min {min:.1}% — GoPlus lock data is often unavailable for Uniswap v3 NFT positions, so this may reflect missing data rather than genuinely unlocked liquidity"),
+                "LP locked",
+            );
+        }
     }
 
     ScreenResult {

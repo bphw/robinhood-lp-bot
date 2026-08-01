@@ -68,3 +68,25 @@ pub async fn discover_new_pools(
 
     Ok((pools, latest))
 }
+
+/// Look up a pool directly by its contract address.
+/// Used for the manual `/check <address>` command when auto-screening is off.
+pub async fn lookup_pool_by_address(
+    client: Arc<ChainClient>,
+    pool_address: Address,
+) -> Result<PoolInfo> {
+    let pool = super::abi::UniswapV3Pool::new(pool_address, client);
+
+    let token0 = pool.token_0().call().await.context("fetching token0 from pool")?;
+    let token1 = pool.token_1().call().await.context("fetching token1 from pool")?;
+    let fee = pool.fee().call().await.context("fetching fee from pool")?;
+
+    Ok(PoolInfo {
+        address: pool_address,
+        token0,
+        token1,
+        fee,
+        created_block: 0,
+        created_timestamp: 0,
+    })
+}

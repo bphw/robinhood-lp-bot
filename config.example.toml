@@ -112,6 +112,9 @@ min_lp_locked_pct = 0.0
 # GoPlus-derived check above fail (true, conservative) or just get skipped
 # (false, so the pool can still pass on TVL/volume/APR/honeypot alone)?
 require_goplus_data = true
+# Temporarily hide GoPlus security checks and omit them from Telegram
+# responses. When true, GoPlus is neither fetched nor mentioned.
+hide_goplus = true
 
 [monitoring]
 # Close (with a Telegram confirmation button) once a position's PnL hits
