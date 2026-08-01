@@ -517,6 +517,20 @@ async fn handle_check_command(
         }
     };
 
+    // Even when DexScreener gave us TVL / volume / age, we still need the
+    // on-chain honeypot simulation — the screener hard-fails if
+    // honeypot_sellable is None. Run compute_metrics in the background just
+    // to fill honeypot and market-cap fields, then merge them into the
+    // DexScreener-derived metrics without overwriting TVL/volume/APR.
+    match crate::chain::metrics::compute_metrics(client.clone(), cfg, &pool_info, latest_block, now_ts).await {
+        Ok(on_chain) => {
+            metrics.honeypot_sellable = on_chain.honeypot_sellable;
+            metrics.honeypot_round_trip_loss_percent = on_chain.honeypot_round_trip_loss_percent;
+            metrics.market_cap_usd = on_chain.market_cap_usd.or(metrics.market_cap_usd);
+        }
+        Err(e) => log::warn!("On-chain honeypot check failed for /check {}: {e:?}", pool_hex),
+    }
+
     let candidate = PoolCandidate { info: pool_info.clone(), metrics };
     let result = crate::screener::screen(candidate, &cfg.screening);
 
