@@ -110,7 +110,9 @@ async fn run_scan_cycle(
             continue;
         }
 
-        let metrics = match chain::metrics::compute_metrics(client.clone(), cfg, &pool, latest_block, now_ts).await {
+        let metrics = match chain::dexscreener::compute_metrics_with_fallback(
+            client.clone(), cfg, &pool, latest_block, now_ts,
+        ).await {
             Ok(m) => m,
             Err(e) => {
                 log::warn!("Failed to compute metrics for pool {:?}: {e:?}", pool.address);
