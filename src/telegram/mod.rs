@@ -598,8 +598,163 @@ async fn handle_status_command(
     Ok(())
 }
 
+/// Format a millisecond timestamp into a human-readable age string.
+fn format_age_ms(pair_created_at_ms: Option<u64>) -> String {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    let age_sec = pair_created_at_ms.map(|ms| now_ms.saturating_sub(ms) / 1000);
+    match age_sec {
+        None => "unknown".to_string(),
+        Some(s) if s < 60 => "<1m".to_string(),
+        Some(s) if s < 3600 => format!("{:.0}m", s as f64 / 60.0),
+        Some(s) if s < 86400 => format!("{:.1}h", s as f64 / 3600.0),
+        Some(s) if s < 2_592_000 => format!("{:.0}d", s as f64 / 86400.0),
+        Some(s) => format!("{:.1}mo", s as f64 / 2_592_000.0),
+    }
+}
+
+/// Compact USD formatter: 5.04M, 45.1K, 1,057, <1.
+fn fmt_compact(v: f64) -> String {
+    if v >= 1_000_000_000.0 {
+        format!("${:.2}B", v / 1_000_000_000.0)
+    } else if v >= 1_000_000.0 {
+        format!("${:.2}M", v / 1_000_000.0)
+    } else if v >= 1_000.0 {
+        format!("${:.1}K", v / 1_000.0)
+    } else if v >= 1.0 {
+        format!("${:.0}", v)
+    } else {
+        "<$1".to_string()
+    }
+}
+
+/// Format a number with comma separators.
+fn fmt_num(n: u64) -> String {
+    n.to_string()
+        .as_bytes()
+        .rchunks(3)
+        .rev()
+        .map(std::str::from_utf8)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap_or_default()
+        .join(",")
+}
+
+/// Average trade size = volume / total transactions. Returns compact string.
+fn avg_trade(vol: f64, buys: u64, sells: u64) -> String {
+    let txns = buys + sells;
+    if txns == 0 {
+        "—".to_string()
+    } else {
+        fmt_compact(vol / txns as f64)
+    }
+}
+
+/// What percentage of the 24h volume does this shorter window represent?
+fn pct_of_24h(window_vol: f64, h24_vol: f64) -> String {
+    if h24_vol <= 0.0 {
+        "—".to_string()
+    } else {
+        format!("{:.1}%", window_vol / h24_vol * 100.0)
+    }
+}
+
+/// Build the full DexScreener pair message with multi-timeframe table.
+fn dexscreener_pair_message(i: usize, p: &crate::chain::dexscreener::DexScreenerPair) -> String {
+    use crate::chain::dexscreener::DexScreenerPair;
+
+    let age = format_age_ms(p.pair_created_at);
+    let price = format!("${}", p.price_usd);
+
+    let mut lines = vec![
+        format!(
+            "📊 *#{} {} / {}* | {} | Age: *{}* | Price: *{}*",
+            i + 1,
+            p.base_token.symbol,
+            p.quote_token.symbol,
+            p.chain_id,
+            age,
+            price
+        ),
+        String::new(),
+        "| TF | Buys | Sells | Volume | Avg Trade | vs 24h |".to_string(),
+        "|---|---|---|---|---|---|".to_string(),
+    ];
+
+    let h24_vol = p.volume.h24;
+
+    // 24h baseline row
+    let txns_24h = p.txns.h24.buys + p.txns.h24.sells;
+    lines.push(format!(
+        "| 24h | {} | {} | {} | {} | — |",
+        fmt_num(p.txns.h24.buys),
+        fmt_num(p.txns.h24.sells),
+        fmt_compact(h24_vol),
+        avg_trade(h24_vol, p.txns.h24.buys, p.txns.h24.sells),
+    ));
+
+    // 6h row
+    let txns_6h = p.txns.h6.buys + p.txns.h6.sells;
+    lines.push(format!(
+        "| 6h | {} | {} | {} | {} | {} |",
+        fmt_num(p.txns.h6.buys),
+        fmt_num(p.txns.h6.sells),
+        fmt_compact(p.volume.h6),
+        avg_trade(p.volume.h6, p.txns.h6.buys, p.txns.h6.sells),
+        pct_of_24h(p.volume.h6, h24_vol),
+    ));
+
+    // 1h row
+    let txns_1h = p.txns.h1.buys + p.txns.h1.sells;
+    lines.push(format!(
+        "| 1h | {} | {} | {} | {} | {} |",
+        fmt_num(p.txns.h1.buys),
+        fmt_num(p.txns.h1.sells),
+        fmt_compact(p.volume.h1),
+        avg_trade(p.volume.h1, p.txns.h1.buys, p.txns.h1.sells),
+        pct_of_24h(p.volume.h1, h24_vol),
+    ));
+
+    // 5m row
+    let txns_5m = p.txns.m5.buys + p.txns.m5.sells;
+    lines.push(format!(
+        "| 5m | {} | {} | {} | {} | {} |",
+        fmt_num(p.txns.m5.buys),
+        fmt_num(p.txns.m5.sells),
+        fmt_compact(p.volume.m5),
+        avg_trade(p.volume.m5, p.txns.m5.buys, p.txns.m5.sells),
+        pct_of_24h(p.volume.m5, h24_vol),
+    ));
+
+    lines.push(String::new());
+
+    // Summary line: liquidity + FDV/MCap + 24h change
+    let mut summary_parts = vec![];
+    if let Some(liq) = &p.liquidity {
+        summary_parts.push(format!("*Liquidity:* {}", fmt_compact(liq.usd)));
+    }
+    if let Some(fdv) = p.fdv {
+        summary_parts.push(format!("*FDV:* {}", fmt_compact(fdv)));
+    }
+    if let Some(mc) = p.market_cap {
+        summary_parts.push(format!("*Mkt Cap:* {}", fmt_compact(mc)));
+    }
+    if let Some(pc) = p.price_change.h24 {
+        let emoji = if pc >= 0.0 { "🟢" } else { "🔴" };
+        summary_parts.push(format!("*24h:* {} {:.2}%", emoji, pc));
+    }
+    if !summary_parts.is_empty() {
+        lines.push(summary_parts.join(" · "));
+    }
+
+    lines.push(format!("[Open on DexScreener]({})", p.url));
+    lines.join("\n")
+}
+
 /// Quick DexScreener lookup by token symbol or address.
-/// Shows up to 5 pairs with price, liquidity, volume, and txn counts.
+/// Shows up to 5 pairs with multi-timeframe metrics.
 async fn handle_dexscreener_command(
     bot: &Bot,
     chat_id: ChatId,
@@ -647,36 +802,7 @@ async fn handle_dexscreener_command(
     }
 
     for (i, p) in pairs.iter().take(5).enumerate() {
-        let mut lines = vec![
-            format!("*#{} {}* ({})", i + 1, p.base_token.symbol, p.chain_id),
-            format!("*Pair:* {} / {}", p.base_token.symbol, p.quote_token.symbol),
-            format!("*Pool:* `{}`", p.pair_address),
-            format!("*DEX:* {}", p.dex_id),
-            format!("*Price:* ${}", p.price_usd),
-        ];
-        if let Some(pc) = p.price_change.h24 {
-            let emoji = if pc >= 0.0 { "🟢" } else { "🔴" };
-            lines.push(format!("*24h change:* {} {:.2}%", emoji, pc));
-        }
-        if let Some(liq) = &p.liquidity {
-            lines.push(format!("*Liquidity:* ${:.0}", liq.usd));
-        } else {
-            lines.push("*Liquidity:* N/A".to_string());
-        }
-        lines.push(format!("*24h Volume:* ${:.0}", p.volume.h24));
-        if let Some(fdv) = p.fdv {
-            lines.push(format!("*FDV:* ${:.0}", fdv));
-        }
-        if let Some(mc) = p.market_cap {
-            lines.push(format!("*Market Cap:* ${:.0}", mc));
-        }
-        lines.push(format!(
-            "*24h Txns:* {} buys / {} sells",
-            p.txns.h24.buys, p.txns.h24.sells
-        ));
-        lines.push(format!("[Open on DexScreener]({})", p.url));
-
-        let text = lines.join("\n");
+        let text = dexscreener_pair_message(i, p);
         bot.send_message(chat_id, text)
             .parse_mode(teloxide::types::ParseMode::Markdown)
             .await?;
