@@ -661,89 +661,67 @@ fn pct_of_24h(window_vol: f64, h24_vol: f64) -> String {
     }
 }
 
-/// Build the full DexScreener pair message with multi-timeframe table.
+/// Build the full DexScreener pair message with a monospace table.
 fn dexscreener_pair_message(i: usize, p: &crate::chain::dexscreener::DexScreenerPair) -> String {
-    use crate::chain::dexscreener::DexScreenerPair;
-
     let age = format_age_ms(p.pair_created_at);
-    let price = format!("${}", p.price_usd);
-
-    let mut lines = vec![
-        format!(
-            "📊 *#{} {} / {}* | {} | Age: *{}* | Price: *{}*",
-            i + 1,
-            p.base_token.symbol,
-            p.quote_token.symbol,
-            p.chain_id,
-            age,
-            price
-        ),
-        String::new(),
-        "| TF | Buys | Sells | Volume | Avg Trade | vs 24h |".to_string(),
-        "|---|---|---|---|---|---|".to_string(),
-    ];
-
     let h24_vol = p.volume.h24;
 
-    // 24h baseline row
-    let txns_24h = p.txns.h24.buys + p.txns.h24.sells;
+    let mut lines = vec![format!(
+        "📊 *#{} {} / {}* · {} · Age: *{}* · Price: *{}*",
+        i + 1,
+        p.base_token.symbol,
+        p.quote_token.symbol,
+        p.chain_id,
+        age,
+        p.price_usd
+    )];
+
+    // Monospace table inside a code block — renders perfectly on every Telegram client
+    lines.push("```".to_string());
     lines.push(format!(
-        "| 24h | {} | {} | {} | {} | — |",
-        fmt_num(p.txns.h24.buys),
-        fmt_num(p.txns.h24.sells),
-        fmt_compact(h24_vol),
-        avg_trade(h24_vol, p.txns.h24.buys, p.txns.h24.sells),
+        "{:>3} {:>8} {:>8} {:>10} {:>10} {:>7}",
+        "TF", "Buys", "Sells", "Volume", "AvgTrade", "vs24h"
     ));
 
-    // 6h row
-    let txns_6h = p.txns.h6.buys + p.txns.h6.sells;
-    lines.push(format!(
-        "| 6h | {} | {} | {} | {} | {} |",
-        fmt_num(p.txns.h6.buys),
-        fmt_num(p.txns.h6.sells),
-        fmt_compact(p.volume.h6),
-        avg_trade(p.volume.h6, p.txns.h6.buys, p.txns.h6.sells),
-        pct_of_24h(p.volume.h6, h24_vol),
-    ));
+    // helper to build one row
+    let mut push_row = |tf: &str, buys: u64, sells: u64, vol: f64| {
+        let vs = if tf == "24h" {
+            "—".to_string()
+        } else {
+            pct_of_24h(vol, h24_vol)
+        };
+        lines.push(format!(
+            "{:>3} {:>8} {:>8} {:>10} {:>10} {:>7}",
+            tf,
+            fmt_num(buys),
+            fmt_num(sells),
+            fmt_compact(vol),
+            avg_trade(vol, buys, sells),
+            vs
+        ));
+    };
 
-    // 1h row
-    let txns_1h = p.txns.h1.buys + p.txns.h1.sells;
-    lines.push(format!(
-        "| 1h | {} | {} | {} | {} | {} |",
-        fmt_num(p.txns.h1.buys),
-        fmt_num(p.txns.h1.sells),
-        fmt_compact(p.volume.h1),
-        avg_trade(p.volume.h1, p.txns.h1.buys, p.txns.h1.sells),
-        pct_of_24h(p.volume.h1, h24_vol),
-    ));
+    push_row("24h", p.txns.h24.buys, p.txns.h24.sells, p.volume.h24);
+    push_row("6h", p.txns.h6.buys, p.txns.h6.sells, p.volume.h6);
+    push_row("1h", p.txns.h1.buys, p.txns.h1.sells, p.volume.h1);
+    push_row("5m", p.txns.m5.buys, p.txns.m5.sells, p.volume.m5);
 
-    // 5m row
-    let txns_5m = p.txns.m5.buys + p.txns.m5.sells;
-    lines.push(format!(
-        "| 5m | {} | {} | {} | {} | {} |",
-        fmt_num(p.txns.m5.buys),
-        fmt_num(p.txns.m5.sells),
-        fmt_compact(p.volume.m5),
-        avg_trade(p.volume.m5, p.txns.m5.buys, p.txns.m5.sells),
-        pct_of_24h(p.volume.m5, h24_vol),
-    ));
+    lines.push("```".to_string());
 
-    lines.push(String::new());
-
-    // Summary line: liquidity + FDV/MCap + 24h change
+    // Summary line outside the code block so markdown bold/link work
     let mut summary_parts = vec![];
     if let Some(liq) = &p.liquidity {
-        summary_parts.push(format!("*Liquidity:* {}", fmt_compact(liq.usd)));
+        summary_parts.push(format!("💧 {}", fmt_compact(liq.usd)));
     }
     if let Some(fdv) = p.fdv {
-        summary_parts.push(format!("*FDV:* {}", fmt_compact(fdv)));
+        summary_parts.push(format!("🏦 {}", fmt_compact(fdv)));
     }
     if let Some(mc) = p.market_cap {
-        summary_parts.push(format!("*Mkt Cap:* {}", fmt_compact(mc)));
+        summary_parts.push(format!("📈 {}", fmt_compact(mc)));
     }
     if let Some(pc) = p.price_change.h24 {
         let emoji = if pc >= 0.0 { "🟢" } else { "🔴" };
-        summary_parts.push(format!("*24h:* {} {:.2}%", emoji, pc));
+        summary_parts.push(format!("24h {} {:.2}%", emoji, pc));
     }
     if !summary_parts.is_empty() {
         lines.push(summary_parts.join(" · "));
