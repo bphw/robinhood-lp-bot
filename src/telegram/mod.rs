@@ -219,6 +219,8 @@ pub async fn run_bot(
                     handle_add_lp_tap(&bot, &q, cfg, client, storage, pool_hex).await;
                 } else if let Some(token_id_str) = data.strip_prefix("closepos:") {
                     handle_close_tap(&bot, &q, cfg, client, storage, token_id_str).await;
+                } else if let Some(addr) = data.strip_prefix("copyaddr:") {
+                    let _ = bot.send_message(ChatId(sender_chat_id), addr).await;
                 }
             }
             respond(())
@@ -786,8 +788,13 @@ async fn handle_dexscreener_command(
 
     for (i, p) in pairs.iter().take(5).enumerate() {
         let text = dexscreener_pair_message(i, p);
+        let keyboard = InlineKeyboardMarkup::new(vec![vec![InlineKeyboardButton::callback(
+            "📋 Copy pool address",
+            format!("copyaddr:{}", p.pair_address),
+        )]]);
         bot.send_message(chat_id, text)
             .parse_mode(teloxide::types::ParseMode::Markdown)
+            .reply_markup(keyboard)
             .await?;
     }
 
