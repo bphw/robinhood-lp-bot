@@ -71,15 +71,36 @@ pub async fn discover_new_pools(
 
 /// Look up a pool directly by its contract address.
 /// Used for the manual `/check <address>` command when auto-screening is off.
+/// Gracefully handles both Uniswap V3 pools (fee() present) and V2 pairs
+/// (fee() reverts; we detect V2 via getReserves and use fee=3000 = 0.3%).
 pub async fn lookup_pool_by_address(
     client: Arc<ChainClient>,
     pool_address: Address,
 ) -> Result<PoolInfo> {
-    let pool = super::abi::UniswapV3Pool::new(pool_address, client);
+    let pool = super::abi::UniswapV3Pool::new(pool_address, client.clone());
 
     let token0 = pool.token_0().call().await.context("fetching token0 from pool")?;
     let token1 = pool.token_1().call().await.context("fetching token1 from pool")?;
-    let fee = pool.fee().call().await.context("fetching fee from pool")?;
+
+    let fee = match pool.fee().call().await {
+        Ok(f) => f,
+        Err(_) => {
+            // fee() reverted — could be a V2 pair. Verify with getReserves.
+            let get_reserves_data = ethers::types::Bytes::from(vec![0x09, 0x02, 0xf1, 0xac]);
+            let tx = ethers::types::TransactionRequest::new()
+                .to(pool_address)
+                .data(get_reserves_data);
+            match client.call(&tx.into(), None).await {
+                Ok(_) => {
+                    log::info!("Pool {:?} is Uniswap V2 (getReserves succeeded, fee() reverted); using fee=3000 (0.3%)", pool_address);
+                    3000 // V2 fixed fee 0.3% expressed in V3 units
+                }
+                Err(_) => {
+                    return Err(anyhow::anyhow!("fetching fee from pool"));
+                }
+            }
+        }
+    };
 
     Ok(PoolInfo {
         address: pool_address,
