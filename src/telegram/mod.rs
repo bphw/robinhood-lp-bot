@@ -267,6 +267,10 @@ pub async fn run_bot(
                     if let Err(e) = handle_dexscreener_command(&bot, msg.chat.id, trimmed).await {
                         log::error!("Failed to handle /dexscreener: {e:?}");
                     }
+                } else if trimmed.starts_with("/checkalpha") {
+                    if let Err(e) = handle_checkalpha_command(&bot, msg.chat.id, &cfg, client.clone(), trimmed).await {
+                        log::error!("Failed to handle /checkalpha: {e:?}");
+                    }
                 }
             }
             respond(())
@@ -548,6 +552,174 @@ async fn handle_check_command(
     Ok(())
 }
 
+/// Deep-dive "alpha" security report for a pool. Shows contract-level
+/// intelligence not visible on DexScreener or Uniswap front-ends:
+/// GoPlus security, GeckoTerminal trust scores, honeypot simulation,
+/// holder concentration, tax rates, LP lock, verification, etc.
+async fn handle_checkalpha_command(
+    bot: &Bot,
+    chat_id: ChatId,
+    cfg: &Arc<AppConfig>,
+    client: Arc<ChainClient>,
+    text: &str,
+) -> Result<()> {
+    let parts: Vec<&str> = text.split_whitespace().collect();
+    if parts.len() < 2 {
+        bot.send_message(chat_id, "Usage: `/checkalpha <pool_address>`\nExample: `/checkalpha 0x1234…abcd`")
+            .parse_mode(teloxide::types::ParseMode::Markdown)
+            .await?;
+        return Ok(());
+    }
+
+    let pool_hex = parts[1].trim();
+    let pool_addr = match Address::from_str(pool_hex) {
+        Ok(a) => a,
+        Err(_) => {
+            bot.send_message(chat_id, format!("❌ Invalid address: `{pool_hex}`"))
+                .parse_mode(teloxide::types::ParseMode::Markdown)
+                .await?;
+            return Ok(());
+        }
+    };
+
+    let _ = bot.send_message(chat_id, format!("🔍 Running alpha scan on `{pool_hex}`…"))
+        .parse_mode(teloxide::types::ParseMode::Markdown)
+        .await;
+
+    let pool_info = match crate::chain::pools::lookup_pool_by_address(client.clone(), pool_addr).await {
+        Ok(p) => p,
+        Err(e) => {
+            bot.send_message(chat_id, format!("❌ Could not read pool contract `{pool_hex}`:\n`{e}`"))
+                .parse_mode(teloxide::types::ParseMode::Markdown)
+                .await?;
+            return Ok(());
+        }
+    };
+
+    let latest_block = match client.get_block_number().await {
+        Ok(b) => b.as_u64(),
+        Err(_) => 0,
+    };
+    let now_ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
+
+    let m = match crate::chain::dexscreener::compute_metrics_with_fallback(
+        client.clone(), cfg, &pool_info, latest_block, now_ts,
+    ).await {
+        Ok(m) => m,
+        Err(e) => {
+            bot.send_message(chat_id, format!("❌ Failed to compute metrics for `{pool_hex}`:\n`{e}`"))
+                .parse_mode(teloxide::types::ParseMode::Markdown)
+                .await?;
+            return Ok(());
+        }
+    };
+
+    let mut lines = vec![
+        format!("🕵️ *Alpha Report: {} / {}*", m.token0_symbol, m.token1_symbol),
+        format!("`{pool_hex}`"),
+        String::new(),
+    ];
+
+    // ── Contract & Verification ──
+    lines.push("*Contract*".to_string());
+    lines.push(format!(
+        "Token0 verified: {}", fmt_bool(m.token0_verified, "✅", "❌", "❓")
+    ));
+    lines.push(format!(
+        "Token1 verified: {}", fmt_bool(m.token1_verified, "✅", "❌", "❓")
+    ));
+    lines.push(format!(
+        "Ownership renounced: {}", fmt_bool(m.ownership_renounced, "✅", "❌", "❓")
+    ));
+    lines.push(String::new());
+
+    // ── Honeypot & Safety ──
+    lines.push("*Honeypot & Safety*".to_string());
+    lines.push(format!(
+        "Sellable (sim): {}", fmt_bool(m.honeypot_sellable, "✅ Yes", "🚫 No", "❓")
+    ));
+    if let Some(loss) = m.honeypot_round_trip_loss_percent {
+        lines.push(format!("Round-trip loss: {:.2}%", loss));
+    }
+    lines.push(format!(
+        "GoPlus honeypot: {}", fmt_bool(m.is_honeypot_goplus, "🚫 Flagged", "✅ Clean", "❓")
+    ));
+    lines.push(format!(
+        "GeckoTerminal honeypot: {}", fmt_bool(m.gecko_is_honeypot, "🚫 Flagged", "✅ Clean", "❓")
+    ));
+    lines.push(String::new());
+
+    // ── Tax & Mechanics ──
+    lines.push("*Tax & Mechanics*".to_string());
+    if let Some(buy) = m.buy_tax_percent {
+        lines.push(format!("Buy tax: {:.1}%", buy));
+    }
+    if let Some(sell) = m.sell_tax_percent {
+        lines.push(format!("Sell tax: {:.1}%", sell));
+    }
+    lines.push(format!(
+        "Mintable: {}", fmt_bool(m.is_mintable, "🚫 Yes", "✅ No", "❓")
+    ));
+    lines.push(format!(
+        "Blacklistable: {}", fmt_bool(m.is_blacklistable, "🚫 Yes", "✅ No", "❓")
+    ));
+    lines.push(format!(
+        "Transfer pausable: {}", fmt_bool(m.transfer_pausable, "🚫 Yes", "✅ No", "❓")
+    ));
+    lines.push(String::new());
+
+    // ── Holder Concentration ──
+    lines.push("*Holders*".to_string());
+    if let Some(cnt) = m.holder_count {
+        lines.push(format!("Total holders: {}", fmt_num(cnt)));
+    }
+    if let Some(cnt) = m.gecko_holder_count {
+        lines.push(format!("GeckoTerminal holders: {}", fmt_num(cnt)));
+    }
+    if let Some(pct) = m.top10_holder_pct {
+        lines.push(format!("Top 10 concentration: {:.1}%", pct));
+    }
+    if let Some(pct) = m.gecko_top10_holder_pct {
+        lines.push(format!("GeckoTerminal top 10: {:.1}%", pct));
+    }
+    if let Some(pct) = m.dev_holding_pct {
+        lines.push(format!("Dev holding: {:.1}%", pct));
+    }
+    if let Some(pct) = m.gecko_developer_holding_pct {
+        lines.push(format!("GeckoTerminal dev holding: {:.1}%", pct));
+    }
+    lines.push(String::new());
+
+    // ── LP & Trust ──
+    lines.push("*LP & Trust*".to_string());
+    if let Some(pct) = m.lp_locked_pct {
+        lines.push(format!("LP locked: {:.1}%", pct));
+    }
+    if let Some(score) = m.gt_score {
+        let emoji = if score >= 80.0 { "🟢" } else if score >= 50.0 { "🟡" } else { "🔴" };
+        lines.push(format!("GeckoTerminal score: {} {:.1}/100", emoji, score));
+    }
+    lines.push(format!(
+        "GeckoTerminal verified: {}", fmt_bool(m.gt_verified, "✅", "❌", "❓")
+    ));
+    if let Some(addr) = &m.gecko_mint_authority {
+        lines.push(format!("Mint authority: `{}`", addr));
+    }
+    if let Some(addr) = &m.gecko_freeze_authority {
+        lines.push(format!("Freeze authority: `{}`", addr));
+    }
+    if let Some(addr) = &m.gecko_developer_address {
+        lines.push(format!("Dev address: `{}`", addr));
+    }
+
+    let reply = lines.join("\n");
+    bot.send_message(chat_id, reply)
+        .parse_mode(teloxide::types::ParseMode::Markdown)
+        .await?;
+
+    Ok(())
+}
+
 async fn handle_toggle_command(
     bot: &Bot,
     chat_id: ChatId,
@@ -660,6 +832,15 @@ fn pct_of_24h(window_vol: f64, h24_vol: f64) -> String {
         "—".to_string()
     } else {
         format!("{:.1}%", window_vol / h24_vol * 100.0)
+    }
+}
+
+/// Format an Option<bool> into a display string with yes/no/unknown labels.
+fn fmt_bool(v: Option<bool>, yes: &str, no: &str, unknown: &str) -> String {
+    match v {
+        Some(true) => yes.to_string(),
+        Some(false) => no.to_string(),
+        None => unknown.to_string(),
     }
 }
 
