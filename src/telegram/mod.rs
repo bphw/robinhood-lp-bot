@@ -676,6 +676,9 @@ fn dexscreener_pair_message(i: usize, p: &crate::chain::dexscreener::DexScreener
         p.price_usd
     )];
 
+    // Raw pool address on its own line for easy copy-paste (long-press to select)
+    lines.push(p.pair_address.clone());
+
     // Monospace table inside a code block — renders perfectly on every Telegram client
     lines.push("```".to_string());
     lines.push(format!(
@@ -769,10 +772,12 @@ async fn handle_dexscreener_command(
         }
     };
 
+    let pairs: Vec<_> = pairs.into_iter().filter(|p| p.volume.h24 >= 200_000.0).collect();
+
     if pairs.is_empty() {
         bot.send_message(
             chat_id,
-            format!("No results found for `{}` on DexScreener.", query),
+            format!("No results with >=$200k 24h volume found for `{}` on DexScreener.", query),
         )
         .parse_mode(teloxide::types::ParseMode::Markdown)
         .await?;
