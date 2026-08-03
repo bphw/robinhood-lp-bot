@@ -163,6 +163,33 @@ pub async fn fetch_search(query: &str) -> Result<Vec<DexScreenerPair>> {
     Ok(data.pairs.unwrap_or_default())
 }
 
+/// Fetch all pairs for a specific token on a specific chain from DexScreener.
+/// Uses the `token-pairs/v1/{chainId}/{tokenAddress}` endpoint (up to ~30
+/// results). Filter client-side for the DEX/version you need.
+pub async fn fetch_token_pairs(chain_id: &str, token_address: &str) -> Result<Vec<DexScreenerPair>> {
+    let url = format!(
+        "https://api.dexscreener.com/token-pairs/v1/{}/{}",
+        chain_id,
+        token_address
+    );
+    let resp = reqwest::get(&url)
+        .await
+        .context("DexScreener token-pairs request failed")?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        anyhow::bail!("DexScreener token-pairs returned {}: {}", status, body);
+    }
+
+    let data: Vec<DexScreenerPair> = resp
+        .json()
+        .await
+        .context("DexScreener token-pairs JSON parse failed")?;
+
+    Ok(data)
+}
+
 /// Try DexScreener first for a pool's TVL / volume / APR / age, then fall
 /// back to on-chain metrics.  Even when DexScreener has data we still
 /// re-run the on-chain path to fill honeypot + security fields, then merge

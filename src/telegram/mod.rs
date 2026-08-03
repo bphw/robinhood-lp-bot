@@ -267,9 +267,13 @@ pub async fn run_bot(
                     if let Err(e) = handle_dexscreener_command(&bot, msg.chat.id, trimmed).await {
                         log::error!("Failed to handle /dexscreener: {e:?}");
                     }
-                } else if trimmed.starts_with("/checkalpha") {
-                    if let Err(e) = handle_checkalpha_command(&bot, msg.chat.id, &cfg, client.clone(), trimmed).await {
-                        log::error!("Failed to handle /checkalpha: {e:?}");
+                } else if trimmed == "/dextools_top10" {
+                    if let Err(e) = handle_dextools_top10_command(&bot, msg.chat.id, &cfg).await {
+                        log::error!("Failed to handle /dextools_top10: {e:?}");
+                    }
+                } else if trimmed == "/uniswap_top10" {
+                    if let Err(e) = handle_uniswap_top10_command(&bot, msg.chat.id, &cfg).await {
+                        log::error!("Failed to handle /uniswap_top10: {e:?}");
                     }
                 }
             }
@@ -407,9 +411,9 @@ async fn handle_close_tap(
                 r.explorer_tx_url
             );
             if r.swaps.is_empty() {
-                msg.push_str("\nProceeds were already USDG — no swap needed.");
+                msg.push_str("\nProceeds were already WETH — no swap needed.");
             } else {
-                msg.push_str(&format!("\n🔄 Auto-swapped proceeds to USDG ({} swap(s)):", r.swaps.len()));
+                msg.push_str(&format!("\n🔄 Auto-swapped proceeds to WETH ({} swap(s)):", r.swaps.len()));
                 for swap in &r.swaps {
                     msg.push_str(&format!("\n  `{:#x}` → ~{} out", swap.token_in, swap.amount_out));
                 }
@@ -552,172 +556,405 @@ async fn handle_check_command(
     Ok(())
 }
 
-/// Deep-dive "alpha" security report for a pool. Shows contract-level
-/// intelligence not visible on DexScreener or Uniswap front-ends:
-/// GoPlus security, GeckoTerminal trust scores, honeypot simulation,
-/// holder concentration, tax rates, LP lock, verification, etc.
-async fn handle_checkalpha_command(
+/// Fetch top 10 tokens from DexTools for Robinhood chain, filtered by:
+///   1. Robinhood chain only
+///   2. Volume >= $200k in last 1h (via DexScreener)
+///   3. Audit issues <= 3 (via DexTools token audit)
+///   4. Score >= 70 (via DexTools pool score)
+///   5. Uniswap v3 only
+async fn handle_dextools_top10_command(
     bot: &Bot,
     chat_id: ChatId,
     cfg: &Arc<AppConfig>,
-    client: Arc<ChainClient>,
-    text: &str,
 ) -> Result<()> {
-    let parts: Vec<&str> = text.split_whitespace().collect();
-    if parts.len() < 2 {
-        bot.send_message(chat_id, "Usage: `/checkalpha <pool_address>`\nExample: `/checkalpha 0x1234…abcd`")
-            .parse_mode(teloxide::types::ParseMode::Markdown)
-            .await?;
+    if cfg.dextools_api_key.trim().is_empty() {
+        bot.send_message(
+            chat_id,
+            "❌ DexTools API key not configured.\n\
+             Add `dextools_api_key = \"your-key\"` to config.toml and restart.\n\
+             Get a key at https://developer.dextools.io",
+        )
+        .await?;
         return Ok(());
     }
 
-    let pool_hex = parts[1].trim();
-    let pool_addr = match Address::from_str(pool_hex) {
-        Ok(a) => a,
-        Err(_) => {
-            bot.send_message(chat_id, format!("❌ Invalid address: `{pool_hex}`"))
-                .parse_mode(teloxide::types::ParseMode::Markdown)
-                .await?;
-            return Ok(());
-        }
-    };
-
-    let _ = bot.send_message(chat_id, format!("🔍 Running alpha scan on `{pool_hex}`…"))
-        .parse_mode(teloxide::types::ParseMode::Markdown)
+    let _ = bot
+        .send_message(chat_id, "🔍 Scanning DexTools top pools for Robinhood chain…")
         .await;
 
-    let pool_info = match crate::chain::pools::lookup_pool_by_address(client.clone(), pool_addr).await {
+    let dt = crate::chain::dextools::DexToolsClient::new(&cfg.dextools_api_key);
+
+    // 1. Fetch hot pools from DexTools.
+    let hotpools = match dt.fetch_hotpools("robinhood").await {
         Ok(p) => p,
         Err(e) => {
-            bot.send_message(chat_id, format!("❌ Could not read pool contract `{pool_hex}`:\n`{e}`"))
-                .parse_mode(teloxide::types::ParseMode::Markdown)
-                .await?;
+            bot.send_message(
+                chat_id,
+                format!("❌ DexTools API error:\n`{e}`"),
+            )
+            .parse_mode(teloxide::types::ParseMode::Markdown)
+            .await?;
             return Ok(());
         }
     };
 
-    let latest_block = match client.get_block_number().await {
-        Ok(b) => b.as_u64(),
-        Err(_) => 0,
-    };
-    let now_ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
+    if hotpools.is_empty() {
+        bot.send_message(chat_id, "No hot pools found on DexTools for Robinhood chain.").await?;
+        return Ok(());
+    }
 
-    let m = match crate::chain::dexscreener::compute_metrics_with_fallback(
-        client.clone(), cfg, &pool_info, latest_block, now_ts,
-    ).await {
-        Ok(m) => m,
-        Err(e) => {
-            bot.send_message(chat_id, format!("❌ Failed to compute metrics for `{pool_hex}`:\n`{e}`"))
-                .parse_mode(teloxide::types::ParseMode::Markdown)
-                .await?;
-            return Ok(());
+    // 2. Filter for Uniswap v3.
+    let mut v3_pools: Vec<_> = hotpools
+        .into_iter()
+        .filter(|p| {
+            let ename = p.exchange_name.to_lowercase();
+            ename.contains("uniswap") && p.fee > 0.0
+        })
+        .collect();
+
+    if v3_pools.is_empty() {
+        bot.send_message(chat_id, "No Uniswap v3 pools in the DexTools hot list for Robinhood chain.").await?;
+        return Ok(());
+    }
+
+    // 3. Enrich with DexScreener data (volume, mcap, liquidity, age) in parallel.
+    use futures::future::join_all;
+
+    let ds_futures: Vec<_> = v3_pools
+        .iter()
+        .map(|p| crate::chain::dexscreener::fetch_pair("robinhood", &p.address))
+        .collect();
+    let ds_results = join_all(ds_futures).await;
+
+    let mut enriched = Vec::new();
+    for (pool, ds_result) in v3_pools.into_iter().zip(ds_results) {
+        let ds_pair = match ds_result {
+            Ok(Some(p)) => p,
+            _ => continue, // skip if DexScreener doesn't know this pool
+        };
+
+        // Volume filter: >= $200k in last 1h.
+        if ds_pair.volume.h1 < 200_000.0 {
+            continue;
         }
-    };
 
-    let mut lines = vec![
-        format!("🕵️ *Alpha Report: {} / {}*", m.token0_symbol, m.token1_symbol),
-        format!("`{pool_hex}`"),
-        String::new(),
-    ];
+        let mcap = ds_pair.market_cap.or(ds_pair.fdv).unwrap_or(0.0);
+        let liq = ds_pair.liquidity.as_ref().map(|l| l.usd).unwrap_or(0.0);
 
-    // ── Contract & Verification ──
-    lines.push("*Contract*".to_string());
-    lines.push(format!(
-        "Token0 verified: {}", fmt_bool(m.token0_verified, "✅", "❌", "❓")
-    ));
-    lines.push(format!(
-        "Token1 verified: {}", fmt_bool(m.token1_verified, "✅", "❌", "❓")
-    ));
-    lines.push(format!(
-        "Ownership renounced: {}", fmt_bool(m.ownership_renounced, "✅", "❌", "❓")
-    ));
-    lines.push(String::new());
+        let age_sec = ds_pair.pair_created_at.map(|ms| {
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            now_ms.saturating_sub(ms) / 1000
+        });
+        let vol1h = ds_pair.volume.h1;
 
-    // ── Honeypot & Safety ──
-    lines.push("*Honeypot & Safety*".to_string());
-    lines.push(format!(
-        "Sellable (sim): {}", fmt_bool(m.honeypot_sellable, "✅ Yes", "🚫 No", "❓")
-    ));
-    if let Some(loss) = m.honeypot_round_trip_loss_percent {
-        lines.push(format!("Round-trip loss: {:.2}%", loss));
-    }
-    lines.push(format!(
-        "GoPlus honeypot: {}", fmt_bool(m.is_honeypot_goplus, "🚫 Flagged", "✅ Clean", "❓")
-    ));
-    lines.push(format!(
-        "GeckoTerminal honeypot: {}", fmt_bool(m.gecko_is_honeypot, "🚫 Flagged", "✅ Clean", "❓")
-    ));
-    lines.push(String::new());
-
-    // ── Tax & Mechanics ──
-    lines.push("*Tax & Mechanics*".to_string());
-    if let Some(buy) = m.buy_tax_percent {
-        lines.push(format!("Buy tax: {:.1}%", buy));
-    }
-    if let Some(sell) = m.sell_tax_percent {
-        lines.push(format!("Sell tax: {:.1}%", sell));
-    }
-    lines.push(format!(
-        "Mintable: {}", fmt_bool(m.is_mintable, "🚫 Yes", "✅ No", "❓")
-    ));
-    lines.push(format!(
-        "Blacklistable: {}", fmt_bool(m.is_blacklistable, "🚫 Yes", "✅ No", "❓")
-    ));
-    lines.push(format!(
-        "Transfer pausable: {}", fmt_bool(m.transfer_pausable, "🚫 Yes", "✅ No", "❓")
-    ));
-    lines.push(String::new());
-
-    // ── Holder Concentration ──
-    lines.push("*Holders*".to_string());
-    if let Some(cnt) = m.holder_count {
-        lines.push(format!("Total holders: {}", fmt_num(cnt)));
-    }
-    if let Some(cnt) = m.gecko_holder_count {
-        lines.push(format!("GeckoTerminal holders: {}", fmt_num(cnt)));
-    }
-    if let Some(pct) = m.top10_holder_pct {
-        lines.push(format!("Top 10 concentration: {:.1}%", pct));
-    }
-    if let Some(pct) = m.gecko_top10_holder_pct {
-        lines.push(format!("GeckoTerminal top 10: {:.1}%", pct));
-    }
-    if let Some(pct) = m.dev_holding_pct {
-        lines.push(format!("Dev holding: {:.1}%", pct));
-    }
-    if let Some(pct) = m.gecko_developer_holding_pct {
-        lines.push(format!("GeckoTerminal dev holding: {:.1}%", pct));
-    }
-    lines.push(String::new());
-
-    // ── LP & Trust ──
-    lines.push("*LP & Trust*".to_string());
-    if let Some(pct) = m.lp_locked_pct {
-        lines.push(format!("LP locked: {:.1}%", pct));
-    }
-    if let Some(score) = m.gt_score {
-        let emoji = if score >= 80.0 { "🟢" } else if score >= 50.0 { "🟡" } else { "🔴" };
-        lines.push(format!("GeckoTerminal score: {} {:.1}/100", emoji, score));
-    }
-    lines.push(format!(
-        "GeckoTerminal verified: {}", fmt_bool(m.gt_verified, "✅", "❌", "❓")
-    ));
-    if let Some(addr) = &m.gecko_mint_authority {
-        lines.push(format!("Mint authority: `{}`", addr));
-    }
-    if let Some(addr) = &m.gecko_freeze_authority {
-        lines.push(format!("Freeze authority: `{}`", addr));
-    }
-    if let Some(addr) = &m.gecko_developer_address {
-        lines.push(format!("Dev address: `{}`", addr));
+        enriched.push((pool, ds_pair, mcap, liq, age_sec, vol1h));
     }
 
-    let reply = lines.join("\n");
-    bot.send_message(chat_id, reply)
-        .parse_mode(teloxide::types::ParseMode::Markdown)
+    if enriched.is_empty() {
+        bot.send_message(
+            chat_id,
+            "No Uniswap v3 pools on Robinhood chain with >=$200k 1h volume found on DexScreener.",
+        )
         .await?;
+        return Ok(());
+    }
+
+    // 4. Fetch DexTools score + token audit for each candidate in parallel batches.
+    let score_futs: Vec<_> = enriched
+        .iter()
+        .map(|(p, _, _, _, _, _)| dt.fetch_pool_score("robinhood", &p.address))
+        .collect();
+    let audit_futs: Vec<_> = enriched
+        .iter()
+        .map(|(p, _, _, _, _, _)| dt.fetch_token_audit("robinhood", &p.main_token.address))
+        .collect();
+
+    let scores = join_all(score_futs).await;
+    let audits = join_all(audit_futs).await;
+
+    let mut filtered = Vec::new();
+    for (((pool, ds_pair, mcap, liq, age_sec, vol1h), score_res), audit_res) in
+        enriched.into_iter().zip(scores).zip(audits)
+    {
+        let score = match score_res {
+            Ok(s) => s.dext_score.total,
+            Err(_) => 0.0,
+        };
+        if score < 70.0 {
+            continue;
+        }
+
+        let audit_issues = match audit_res {
+            Ok(a) => crate::chain::dextools::audit_issue_count(&a),
+            Err(_) => 99, // treat missing audit as failing
+        };
+        if audit_issues > 3 {
+            continue;
+        }
+
+        filtered.push((pool, ds_pair, mcap, liq, age_sec, vol1h, score, audit_issues));
+    }
+
+    // Sort by DexTools rank (ascending).
+    filtered.sort_by(|a, b| a.0.rank.cmp(&b.0.rank));
+
+    if filtered.is_empty() {
+        bot.send_message(
+            chat_id,
+            "No pools passed all filters (Uniswap v3 + >=$200k 1h vol + score >=70 + audit issues <=3).",
+        )
+        .await?;
+        return Ok(());
+    }
+
+    // 5. Send results — one message per token so the address is easy to copy.
+    for (i, (pool, _ds_pair, mcap, liq, age_sec, vol1h, score, audit_issues)) in
+        filtered.iter().take(10).enumerate()
+    {
+        let age_str = match age_sec {
+            None => "?".to_string(),
+            Some(s) if *s < 60 => "<1m".to_string(),
+            Some(s) if *s < 3600 => format!("{:.0}m", *s as f64 / 60.0),
+            Some(s) if *s < 86400 => format!("{:.0}h", *s as f64 / 3600.0),
+            Some(s) => format!("{:.0}d", *s as f64 / 86400.0),
+        };
+
+        let mcap_str = fmt_compact_nk(*mcap);
+        let vol_str = fmt_compact_nk(*vol1h);
+        let liq_str = fmt_compact_nk(*liq);
+        let shield = if *audit_issues == 0 {
+            "🛡️".to_string()
+        } else {
+            format!("🛡️{}", audit_issues)
+        };
+
+        let text = format!(
+            "📊 *#{} {} / {}*\nM{} V{} L{} S{:.0} {} A{}\n{}",
+            i + 1,
+            pool.main_token.symbol,
+            pool.side_token.symbol,
+            mcap_str,
+            vol_str,
+            liq_str,
+            score,
+            shield,
+            age_str,
+            pool.address.to_lowercase(),
+        );
+
+        let keyboard = InlineKeyboardMarkup::new(vec![vec![InlineKeyboardButton::callback(
+            "📋 Copy pool address",
+            format!("copyaddr:{}", pool.address.to_lowercase()),
+        )]]);
+
+        bot.send_message(chat_id, text)
+            .parse_mode(teloxide::types::ParseMode::Markdown)
+            .reply_markup(keyboard)
+            .await?;
+    }
 
     Ok(())
+}
+
+/// Fetch top 10 Uniswap v3 pools on Robinhood chain from DexScreener,
+/// filtered by:
+///   1. Robinhood chain only
+///   2. Volume >= $200k in last 1h
+///   3. GoPlus audit issues <= 3
+///   4. Computed score >= 70 (liquidity-weighted volume rank)
+///   5. Uniswap v3 only
+async fn handle_uniswap_top10_command(
+    bot: &Bot,
+    chat_id: ChatId,
+    cfg: &Arc<AppConfig>,
+) -> Result<()> {
+    let _ = bot
+        .send_message(chat_id, "🔍 Scanning Uniswap v3 top pools on Robinhood chain…")
+        .await;
+
+    use futures::future::join_all;
+
+    // 1. Fetch pairs for both anchor tokens (WETH + USDG) to maximise coverage.
+    let weth = &cfg.chain.weth_address;
+    let usdg = &cfg.chain.usdc_address;
+
+    let (weth_pairs, usdg_pairs) = tokio::join!(
+        crate::chain::dexscreener::fetch_token_pairs("robinhood", weth),
+        crate::chain::dexscreener::fetch_token_pairs("robinhood", usdg),
+    );
+
+    let mut all_pairs: Vec<_> = weth_pairs.unwrap_or_default();
+    all_pairs.extend(usdg_pairs.unwrap_or_default());
+
+    // Deduplicate by pair address, keep the one with higher 1h volume.
+    let mut seen: std::collections::HashMap<String, crate::chain::dexscreener::DexScreenerPair> = std::collections::HashMap::new();
+    for p in all_pairs {
+        let addr = p.pair_address.to_lowercase();
+        let existing = seen.get(&addr);
+        let keep = match existing {
+            Some(ep) => p.volume.h1 > ep.volume.h1,
+            None => true,
+        };
+        if keep {
+            seen.insert(addr, p);
+        }
+    }
+    let mut unique_pairs: Vec<_> = seen.into_values().collect();
+
+    // 2. Filter for Uniswap v3.
+    let mut v3_pairs: Vec<_> = unique_pairs
+        .into_iter()
+        .filter(|p| {
+            let is_uniswap = p.dex_id.to_lowercase().contains("uniswap");
+            let is_v3 = p.labels.as_ref().map(|l| l.iter().any(|x| x.to_lowercase().contains("v3"))).unwrap_or(false);
+            is_uniswap && is_v3
+        })
+        .collect();
+
+    if v3_pairs.is_empty() {
+        bot.send_message(chat_id, "No Uniswap v3 pools found on Robinhood chain via DexScreener.").await?;
+        return Ok(());
+    }
+
+    // 3. Volume filter: >= $200k in last 1h.
+    v3_pairs.retain(|p| p.volume.h1 >= 200_000.0);
+
+    if v3_pairs.is_empty() {
+        bot.send_message(chat_id, "No Uniswap v3 pools on Robinhood chain with >=$200k 1h volume.").await?;
+        return Ok(());
+    }
+
+    // 4. Fetch GoPlus security for each base token (in parallel).
+    let goplus_futs: Vec<_> = v3_pairs
+        .iter()
+        .map(|p| crate::chain::goplus::fetch_token_security(cfg.chain.chain_id, p.base_token.address.parse().unwrap_or_default()))
+        .collect();
+    let goplus_results = join_all(goplus_futs).await;
+
+    let mut filtered = Vec::new();
+    for (pair, goplus_res) in v3_pairs.into_iter().zip(goplus_results) {
+        let mcap = pair.market_cap.or(pair.fdv).unwrap_or(0.0);
+        let liq = pair.liquidity.as_ref().map(|l| l.usd).unwrap_or(0.0);
+        let vol1h = pair.volume.h1;
+
+        // Compute a simple score: 0-100 based on liquidity + volume ranking.
+        // Higher liquidity + higher volume = higher score.
+        let score = if liq > 0.0 {
+            let vol_score = (vol1h / 1_000_000.0).min(100.0); // up to 100 for $1M+ 1h vol
+            let liq_score = (liq / 500_000.0).min(100.0);     // up to 100 for $500k+ liq
+            (vol_score * 0.6 + liq_score * 0.4).min(100.0)
+        } else {
+            0.0
+        };
+        if score < 70.0 {
+            continue;
+        }
+
+        // Audit via GoPlus: count issues (mintable, blacklistable, honeypot, taxes >5%).
+        let audit_issues = match goplus_res {
+            Ok(Some(g)) => {
+                let mut issues = 0u32;
+                if g.is_mintable == Some(true) { issues += 1; }
+                if g.is_blacklistable == Some(true) { issues += 1; }
+                if g.is_honeypot == Some(true) { issues += 1; }
+                if g.transfer_pausable == Some(true) { issues += 1; }
+                if g.ownership_renounced == Some(false) { issues += 1; }
+                if g.buy_tax_percent.unwrap_or(0.0) > 5.0 { issues += 1; }
+                if g.sell_tax_percent.unwrap_or(0.0) > 5.0 { issues += 1; }
+                issues
+            }
+            _ => 99, // treat missing as failing
+        };
+        if audit_issues > 3 {
+            continue;
+        }
+
+        let age_sec = pair.pair_created_at.map(|ms| {
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            now_ms.saturating_sub(ms) / 1000
+        });
+
+        filtered.push((pair, mcap, liq, age_sec, vol1h, score, audit_issues));
+    }
+
+    // Sort by 1h volume descending.
+    filtered.sort_by(|a, b| b.4.partial_cmp(&a.4).unwrap_or(std::cmp::Ordering::Equal));
+
+    if filtered.is_empty() {
+        bot.send_message(
+            chat_id,
+            "No pools passed all filters (Uniswap v3 + >=$200k 1h vol + score >=70 + GoPlus audit issues <=3).",
+        )
+        .await?;
+        return Ok(());
+    }
+
+    // 5. Send results — one message per token so the address is easy to copy.
+    for (i, (pair, mcap, liq, age_sec, vol1h, score, audit_issues)) in
+        filtered.iter().take(10).enumerate()
+    {
+        let age_str = match age_sec {
+            None => "?".to_string(),
+            Some(s) if *s < 60 => "<1m".to_string(),
+            Some(s) if *s < 3600 => format!("{:.0}m", *s as f64 / 60.0),
+            Some(s) if *s < 86400 => format!("{:.0}h", *s as f64 / 3600.0),
+            Some(s) => format!("{:.0}d", *s as f64 / 86400.0),
+        };
+
+        let mcap_str = fmt_compact_nk(*mcap);
+        let vol_str = fmt_compact_nk(*vol1h);
+        let liq_str = fmt_compact_nk(*liq);
+        let shield = if *audit_issues == 0 {
+            "🛡️".to_string()
+        } else {
+            format!("🛡️{}", audit_issues)
+        };
+
+        let text = format!(
+            "📊 *#{} {} / {}*\nM{} V{} L{} S{:.0} {} A{}\n{}",
+            i + 1,
+            pair.base_token.symbol,
+            pair.quote_token.symbol,
+            mcap_str,
+            vol_str,
+            liq_str,
+            score,
+            shield,
+            age_str,
+            pair.pair_address.to_lowercase(),
+        );
+
+        let keyboard = InlineKeyboardMarkup::new(vec![vec![InlineKeyboardButton::callback(
+            "📋 Copy pool address",
+            format!("copyaddr:{}", pair.pair_address.to_lowercase()),
+        )]]);
+
+        bot.send_message(chat_id, text)
+            .parse_mode(teloxide::types::ParseMode::Markdown)
+            .reply_markup(keyboard)
+            .await?;
+    }
+
+    Ok(())
+}
+
+/// Compact formatter: $1.2M, $500K, $850.
+fn fmt_compact_nk(v: f64) -> String {
+    if v >= 1_000_000_000.0 {
+        format!("${:.1}B", v / 1_000_000_000.0)
+    } else if v >= 1_000_000.0 {
+        format!("${:.1}M", v / 1_000_000.0)
+    } else if v >= 1_000.0 {
+        format!("${:.0}K", v / 1_000.0)
+    } else {
+        format!("${:.0}", v)
+    }
 }
 
 async fn handle_toggle_command(
@@ -762,6 +999,8 @@ async fn handle_status_command(
         "*Commands:*".to_string(),
         "`/check <address>` — score a pool manually".to_string(),
         "`/dexscreener <symbol>` — quick DexScreener lookup".to_string(),
+        "`/dextools_top10` — top 10 DexTools pools (Robinhood, V3, score>=70)".to_string(),
+        "`/uniswap_top10` — top 10 Uniswap v3 pools on Robinhood chain".to_string(),
         "`/toggle_screening` — flip auto-screening on/off".to_string(),
         "`/positions` — list open positions".to_string(),
     ];

@@ -1,6 +1,7 @@
 pub mod abi;
 pub mod autoswap;
 pub mod dexscreener;
+pub mod dextools;
 pub mod geckoterminal;
 pub mod goplus;
 pub mod honeypot;

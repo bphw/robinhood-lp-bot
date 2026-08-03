@@ -152,6 +152,10 @@ pub struct AppConfig {
     pub screening: ScreeningConfig,
     pub monitoring: MonitoringConfig,
     pub telegram: TelegramConfig,
+    /// DEXTools API v2 key (from https://developer.dextools.io). Required
+    /// for the `/dextools_top10` command. Leave empty to disable the command.
+    #[serde(default)]
+    pub dextools_api_key: String,
 }
 
 impl AppConfig {

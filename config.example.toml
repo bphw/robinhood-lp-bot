@@ -140,3 +140,7 @@ approx_blocks_per_hour = 36000
 bot_token = "TODO_REPLACE_ME"
 # TODO: your personal chat ID (message @userinfobot on Telegram to get it).
 chat_id = 0
+
+# DexTools API v2 key (https://developer.dextools.io). Required for /dextools_top10.
+# Leave empty to disable the command.
+dextools_api_key = ""
