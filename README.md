@@ -44,13 +44,20 @@ button to add liquidity to any pool that passes.
    - **Take-profit / stop-loss** — if PnL crosses either threshold, you get
      a Telegram alert with a **"🔴 Close position"** button. Tapping it
      removes all liquidity, collects both principal and fees, and
-     **automatically swaps both tokens into USDG** before confirming — see
+     **automatically swaps both tokens into WETH** before confirming — see
      "Auto-swap on close" below.
    - **Volume spikes** — if recent-window volume on that position's pool
      jumps well above the window before it, you get an alert (with the same
      close button, since a spike can be a reason to exit either direction).
 7. **`/positions`** (or `/pnl`) — message the bot this anytime for a live
    PnL snapshot of every open position, on demand.
+8. **`/dextools_top10`** — fetches the top-ranked pools from DexTools for
+   Robinhood chain, filters for Uniswap V3, >=$200k 1h volume, DexScore >=70,
+   and <=3 audit issues. Returns up to 10 tokens with compact M/V/L/S/Shield/
+   Age readout plus a copyable pool address.
+9. **`/uniswap_top10`** — same filtering logic but sourced from DexScreener
+   (token-pairs endpoint, no API key needed). Useful when DexTools API is
+   unavailable or you want a second opinion.
 
 ## GoPlus security screening
 
@@ -109,16 +116,16 @@ don't map directly onto EVM/ERC20 and are translated:**
 
 ## Auto-swap on close
 
-Every close routes both legs of the position into USDG automatically —
+Every close routes both legs of the position into **WETH** automatically —
 that's what you land with in your wallet, not a mix of whatever two tokens
 the pool happened to be. No extra confirmation tap; it's part of the same
 close action. Routing logic (in `chain/autoswap.rs`):
 
-- A leg that's already USDG: left alone.
-- A leg that's WETH: swapped directly, WETH → USDG.
+- A leg that's already WETH: left alone.
+- A leg that's USDG: swapped directly, USDG → WETH.
 - Any other token: it was paired with WETH or USDG in the pool you just
-  exited (screening guarantees this), so it either swaps directly to USDG
-  at that same fee tier, or two-hops through WETH if that's what it was
+  exited (screening guarantees this), so it either swaps directly to WETH
+  at that same fee tier, or two-hops through USDG if that's what it was
   paired with.
 
 Each swap gets a **QuoterV2 quote first**, then applies `wallet.slippage_bps`
@@ -135,7 +142,7 @@ stuck, in what token, and why, so you can decide whether to hold it or try
 swapping it manually later. Nothing is silently lost — collect() has
 already moved everything into your wallet before any swap is attempted; a
 failed swap just means that leg stays as its original token instead of
-becoming USDG.
+becoming WETH.
 
 **Edge case still not auto-routed**: if a pool's two tokens are neither WETH
 nor USDG on either side, there's no route to auto-swap through — that leg
@@ -149,8 +156,8 @@ that (they're unpriceable in the first place).
   triggered by take-profit, stop-loss, or a volume spike, still requires you
   to tap the "Close position" button — nothing sells on your behalf without
   a tap. What *is* automatic is what happens after you tap: liquidity
-  removal, fee collection, and the swap into USDG all happen in one go, no
-  second confirmation needed for the swap step.
+  removal, fee collection, and the swap into WETH all happen in one
+  go, no second confirmation needed for the swap step.
 - **Slippage protection on close is now in place.** `close_position`
   computes the expected token amounts for the position's liquidity at the
   current on-chain price (same liquidity math used for PnL), applies
@@ -163,6 +170,33 @@ that (they're unpriceable in the first place).
   the exact USD value actually deposited on-chain — these can differ
   slightly due to price impact/slippage at mint time. Good enough for
   PnL-based alerting; not exact accounting.
+
+## Telegram commands
+
+| Command | What it does |
+|---------|-------------|
+| `/positions` (or `/pnl`) | Live PnL snapshot of all open positions |
+| `/check <address>` | Manual pool verification — scores a single pool the same way auto-screening does |
+| `/dexscreener <symbol>` | Quick DexScreener lookup by token symbol or address |
+| `/dextools_top10` | Top 10 DexTools pools on Robinhood chain. Filters: Uniswap V3, >=$200k 1h volume, score >=70, audit issues <=3. Requires `dextools_api_key` in config |
+| `/uniswap_top10` | Top 10 Uniswap V3 pools from DexScreener (no API key needed). Same filters as above but score is computed locally from liquidity + volume |
+| `/toggle_screening` (or `/toggle`) | Enable/disable the auto-screening loop |
+| `/screening_status` (or `/status`) | Current bot config, screening state, and command list |
+
+**Format of `/dextools_top10` and `/uniswap_top10` output:**
+```
+📊 #1 TOKEN / PAIR
+M$1.2M V$500K L$850K S85 🛡️ A2d
+0xabcd...1234
+[📋 Copy pool address]
+```
+- **M** = Market cap (compact: $K / $M / $B)
+- **V** = 1-hour volume
+- **L** = Liquidity
+- **S** = Score (DexScore for DexTools, computed for Uniswap)
+- **🛡️** = Audit shield (number = issue count, plain shield = zero issues)
+- **A** = Pool age
+- Pool address is raw text (long-press to copy on mobile) plus a "Copy" button
 
 ## Security model
 
@@ -267,6 +301,10 @@ username can." Concretely (in `telegram/mod.rs`):
      just an address** — the bot only acts on messages/button-taps from this
      exact chat; everything else is logged and silently ignored (see
      "Security model" below).
+   - `dextools_api_key` (optional) — get a key at
+     [developer.dextools.io](https://developer.dextools.io) if you want to use
+     `/dextools_top10`. Without it, that command returns a config reminder;
+     `/uniswap_top10` works with no key.
    - Adjust the `[screening]` thresholds to taste.
 
 4. **Build and run:**
@@ -299,9 +337,12 @@ src/
     spike.rs            Volume-spike detection (recent window vs. previous window)
     safety.rs          Contract-verification check via Blockscout API
     lp.rs               Builds/sends the add-liquidity and close-position transactions
-    autoswap.rs          Auto-swaps close-position proceeds into USDG (force-close on failure)
+    autoswap.rs          Auto-swaps close-position proceeds into WETH (force-close on failure)
+    dexscreener.rs       DexScreener API client (search, pair lookup, token-pairs, metrics fallback)
+    dextools.rs          DexTools API v2 client (hot pools, pool score, token audit)
+    goplus.rs            GoPlus Token Security API client
   telegram/
-    mod.rs             Alerts, the "Add LP now" / "Close position" buttons, and the /positions command
+    mod.rs             Alerts, buttons, /positions, /check, /dexscreener, /dextools_top10, /uniswap_top10
   main.rs              Wires up three loops: pool discovery, Telegram dispatcher, position monitoring
 ```
 
