@@ -764,9 +764,8 @@ async fn handle_dextools_top10_command(
 ///   1. Robinhood chain only
 ///   2. Volume >= $100k in last 24h
 ///   3. Market cap >= $20k
-///   4. GoPlus audit issues <= 3
-///   5. Computed score >= 70 (liquidity-weighted volume rank)
-///   6. Uniswap v3 only
+///   4. Computed score >= 50 (liquidity-weighted volume rank)
+///   5. Uniswap v3 only
 async fn handle_uniswap_top10_command(
     bot: &Bot,
     chat_id: ChatId,
@@ -775,8 +774,6 @@ async fn handle_uniswap_top10_command(
     let _ = bot
         .send_message(chat_id, "🔍 Scanning Uniswap v3 top pools on Robinhood chain…")
         .await;
-
-    use futures::future::join_all;
 
     // 1. Fetch pairs for both anchor tokens (WETH + USDG) to maximise coverage.
     let weth = &cfg.chain.weth_address;
@@ -828,15 +825,8 @@ async fn handle_uniswap_top10_command(
         return Ok(());
     }
 
-    // 4. Fetch GoPlus security for each base token (in parallel).
-    let goplus_futs: Vec<_> = v3_pairs
-        .iter()
-        .map(|p| crate::chain::goplus::fetch_token_security(cfg.chain.chain_id, p.base_token.address.parse().unwrap_or_default()))
-        .collect();
-    let goplus_results = join_all(goplus_futs).await;
-
     let mut filtered = Vec::new();
-    for (pair, goplus_res) in v3_pairs.into_iter().zip(goplus_results) {
+    for pair in v3_pairs {
         let mcap = pair.market_cap.or(pair.fdv).unwrap_or(0.0);
         if mcap < 20_000.0 {
             continue;
@@ -845,7 +835,6 @@ async fn handle_uniswap_top10_command(
         let vol24h = pair.volume.h24;
 
         // Compute a simple score: 0-100 based on liquidity + volume ranking.
-        // Higher liquidity + higher volume = higher score.
         let score = if liq > 0.0 {
             let vol_score = (vol24h / 1_000_000.0).min(100.0); // up to 100 for $1M+ 24h vol
             let liq_score = (liq / 500_000.0).min(100.0);     // up to 100 for $500k+ liq
@@ -853,26 +842,7 @@ async fn handle_uniswap_top10_command(
         } else {
             0.0
         };
-        if score < 70.0 {
-            continue;
-        }
-
-        // Audit via GoPlus: count issues (mintable, blacklistable, honeypot, taxes >5%).
-        let audit_issues = match goplus_res {
-            Ok(Some(g)) => {
-                let mut issues = 0u32;
-                if g.is_mintable == Some(true) { issues += 1; }
-                if g.is_blacklistable == Some(true) { issues += 1; }
-                if g.is_honeypot == Some(true) { issues += 1; }
-                if g.transfer_pausable == Some(true) { issues += 1; }
-                if g.ownership_renounced == Some(false) { issues += 1; }
-                if g.buy_tax_percent.unwrap_or(0.0) > 5.0 { issues += 1; }
-                if g.sell_tax_percent.unwrap_or(0.0) > 5.0 { issues += 1; }
-                issues
-            }
-            _ => 99, // treat missing as failing
-        };
-        if audit_issues > 3 {
+        if score < 50.0 {
             continue;
         }
 
@@ -884,7 +854,7 @@ async fn handle_uniswap_top10_command(
             now_ms.saturating_sub(ms) / 1000
         });
 
-        filtered.push((pair, mcap, liq, age_sec, vol24h, score, audit_issues));
+        filtered.push((pair, mcap, liq, age_sec, vol24h, score));
     }
 
     // Sort by 24h volume descending.
@@ -893,14 +863,14 @@ async fn handle_uniswap_top10_command(
     if filtered.is_empty() {
         bot.send_message(
             chat_id,
-            "No pools passed all filters (Uniswap v3 + >=$100k 24h vol + mcap >=$20k + score >=70 + GoPlus audit issues <=3).",
+            "No pools passed all filters (Uniswap v3 + >=$100k 24h vol + mcap >=$20k + score >=50).",
         )
         .await?;
         return Ok(());
     }
 
-    // 5. Send results — one message per token so the address is easy to copy.
-    for (i, (pair, mcap, liq, age_sec, vol24h, score, audit_issues)) in
+    // 4. Send results — one message per token so the address is easy to copy.
+    for (i, (pair, mcap, liq, age_sec, vol24h, score)) in
         filtered.iter().take(10).enumerate()
     {
         let age_str = match age_sec {
@@ -914,14 +884,9 @@ async fn handle_uniswap_top10_command(
         let mcap_str = fmt_compact_nk(*mcap);
         let vol_str = fmt_compact_nk(*vol24h);
         let liq_str = fmt_compact_nk(*liq);
-        let shield = if *audit_issues == 0 {
-            "🛡️".to_string()
-        } else {
-            format!("🛡️{}", audit_issues)
-        };
 
         let text = format!(
-            "📊 *#{} {} / {}*\nM{} V{} L{} S{:.0} {} A{}\n{}",
+            "📊 *#{} {} / {}*\nM{} V{} L{} S{:.0} A{}\n{}",
             i + 1,
             pair.base_token.symbol,
             pair.quote_token.symbol,
@@ -929,7 +894,6 @@ async fn handle_uniswap_top10_command(
             vol_str,
             liq_str,
             score,
-            shield,
             age_str,
             pair.pair_address.to_lowercase(),
         );
