@@ -235,10 +235,9 @@ pub async fn compute_metrics_with_fallback(
                 token1_symbol: token1_sym,
                 tvl_usd: ds.liquidity.as_ref().map(|liq| liq.usd),
                 volume_24h_usd: Some(ds.volume.h24),
+                market_cap_usd: ds.market_cap.or(ds.fdv),
                 apr_percent: apr,
                 age_hours,
-                token0_verified: Some(true),
-                token1_verified: Some(true),
                 ..Default::default()
             }
         }

@@ -518,8 +518,16 @@ async fn handle_check_command(
         lines.push(format!("*Est. fee APR:* {:.1}%", apr));
     }
     lines.push(format!("*Age:* {:.1}h", result.candidate.metrics.age_hours));
-    lines.push(format!("*Token0 verified:* {}", if result.candidate.metrics.token0_verified.unwrap_or(false) { "✅" } else { "❌" }));
-    lines.push(format!("*Token1 verified:* {}", if result.candidate.metrics.token1_verified.unwrap_or(false) { "✅" } else { "❌" }));
+    lines.push(format!(
+        "*{} verified:* {}",
+        result.candidate.metrics.token0_symbol,
+        if result.candidate.metrics.token0_verified.unwrap_or(false) { "✅" } else { "❌" }
+    ));
+    lines.push(format!(
+        "*{} verified:* {}",
+        result.candidate.metrics.token1_symbol,
+        if result.candidate.metrics.token1_verified.unwrap_or(false) { "✅" } else { "❌" }
+    ));
     lines.push(String::new());
 
     if result.passed {
