@@ -762,10 +762,11 @@ async fn handle_dextools_top10_command(
 /// Fetch top 10 Uniswap v3 pools on Robinhood chain from DexScreener,
 /// filtered by:
 ///   1. Robinhood chain only
-///   2. Volume >= $200k in last 1h
-///   3. GoPlus audit issues <= 3
-///   4. Computed score >= 70 (liquidity-weighted volume rank)
-///   5. Uniswap v3 only
+///   2. Volume >= $100k in last 24h
+///   3. Market cap >= $20k
+///   4. GoPlus audit issues <= 3
+///   5. Computed score >= 70 (liquidity-weighted volume rank)
+///   6. Uniswap v3 only
 async fn handle_uniswap_top10_command(
     bot: &Bot,
     chat_id: ChatId,
@@ -789,13 +790,13 @@ async fn handle_uniswap_top10_command(
     let mut all_pairs: Vec<_> = weth_pairs.unwrap_or_default();
     all_pairs.extend(usdg_pairs.unwrap_or_default());
 
-    // Deduplicate by pair address, keep the one with higher 1h volume.
+    // Deduplicate by pair address, keep the one with higher 24h volume.
     let mut seen: std::collections::HashMap<String, crate::chain::dexscreener::DexScreenerPair> = std::collections::HashMap::new();
     for p in all_pairs {
         let addr = p.pair_address.to_lowercase();
         let existing = seen.get(&addr);
         let keep = match existing {
-            Some(ep) => p.volume.h1 > ep.volume.h1,
+            Some(ep) => p.volume.h24 > ep.volume.h24,
             None => true,
         };
         if keep {
@@ -819,11 +820,11 @@ async fn handle_uniswap_top10_command(
         return Ok(());
     }
 
-    // 3. Volume filter: >= $200k in last 1h.
-    v3_pairs.retain(|p| p.volume.h1 >= 200_000.0);
+    // 3. Volume filter: >= $100k in last 24h.
+    v3_pairs.retain(|p| p.volume.h24 >= 100_000.0);
 
     if v3_pairs.is_empty() {
-        bot.send_message(chat_id, "No Uniswap v3 pools on Robinhood chain with >=$200k 1h volume.").await?;
+        bot.send_message(chat_id, "No Uniswap v3 pools on Robinhood chain with >=$100k 24h volume.").await?;
         return Ok(());
     }
 
@@ -837,13 +838,16 @@ async fn handle_uniswap_top10_command(
     let mut filtered = Vec::new();
     for (pair, goplus_res) in v3_pairs.into_iter().zip(goplus_results) {
         let mcap = pair.market_cap.or(pair.fdv).unwrap_or(0.0);
+        if mcap < 20_000.0 {
+            continue;
+        }
         let liq = pair.liquidity.as_ref().map(|l| l.usd).unwrap_or(0.0);
-        let vol1h = pair.volume.h1;
+        let vol24h = pair.volume.h24;
 
         // Compute a simple score: 0-100 based on liquidity + volume ranking.
         // Higher liquidity + higher volume = higher score.
         let score = if liq > 0.0 {
-            let vol_score = (vol1h / 1_000_000.0).min(100.0); // up to 100 for $1M+ 1h vol
+            let vol_score = (vol24h / 1_000_000.0).min(100.0); // up to 100 for $1M+ 24h vol
             let liq_score = (liq / 500_000.0).min(100.0);     // up to 100 for $500k+ liq
             (vol_score * 0.6 + liq_score * 0.4).min(100.0)
         } else {
@@ -880,23 +884,23 @@ async fn handle_uniswap_top10_command(
             now_ms.saturating_sub(ms) / 1000
         });
 
-        filtered.push((pair, mcap, liq, age_sec, vol1h, score, audit_issues));
+        filtered.push((pair, mcap, liq, age_sec, vol24h, score, audit_issues));
     }
 
-    // Sort by 1h volume descending.
+    // Sort by 24h volume descending.
     filtered.sort_by(|a, b| b.4.partial_cmp(&a.4).unwrap_or(std::cmp::Ordering::Equal));
 
     if filtered.is_empty() {
         bot.send_message(
             chat_id,
-            "No pools passed all filters (Uniswap v3 + >=$200k 1h vol + score >=70 + GoPlus audit issues <=3).",
+            "No pools passed all filters (Uniswap v3 + >=$100k 24h vol + mcap >=$20k + score >=70 + GoPlus audit issues <=3).",
         )
         .await?;
         return Ok(());
     }
 
     // 5. Send results — one message per token so the address is easy to copy.
-    for (i, (pair, mcap, liq, age_sec, vol1h, score, audit_issues)) in
+    for (i, (pair, mcap, liq, age_sec, vol24h, score, audit_issues)) in
         filtered.iter().take(10).enumerate()
     {
         let age_str = match age_sec {
@@ -908,7 +912,7 @@ async fn handle_uniswap_top10_command(
         };
 
         let mcap_str = fmt_compact_nk(*mcap);
-        let vol_str = fmt_compact_nk(*vol1h);
+        let vol_str = fmt_compact_nk(*vol24h);
         let liq_str = fmt_compact_nk(*liq);
         let shield = if *audit_issues == 0 {
             "🛡️".to_string()
