@@ -237,7 +237,10 @@ async fn run_honeypot_check(
     } else if pool.token1 != weth && pool.token1 != usdg {
         (pool.token1, pool.token0, p0, dec0)
     } else {
-        return (None, None); // both sides are reference assets, nothing to test
+        // Both sides are reference assets (WETH/USDG etc.) — honeypot check
+        // is not applicable, but we treat it as passed so the pool isn't
+        // rejected on a criterion that doesn't apply to safe reference tokens.
+        return (Some(true), Some(0.0));
     };
 
     if ref_price <= 0.0 {
